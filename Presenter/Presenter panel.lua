@@ -1,5 +1,5 @@
 -- @description Presenter panel: big-text region view with one-click exclusive clip playback
--- @version 4.4
+-- @version 4.5
 -- @about
 --   A dockable ReaImGui window for presenting listening tests (e.g. over Zoom).
 --
@@ -1356,6 +1356,12 @@ local function drawIcon(kind, col)
     ImGui.DrawList_AddTriangleFilled(dl, cx + s * 0.3, yt - hd, cx + s * 0.3, yt + hd, cx + s, yt, col)
     ImGui.DrawList_AddLine(dl, cx + s, yb, cx - s * 0.35, yb, col, t)
     ImGui.DrawList_AddTriangleFilled(dl, cx - s * 0.3, yb - hd, cx - s * 0.3, yb + hd, cx - s, yb, col)
+  elseif kind == 'edit' then
+    -- pencil: slanted body, point at the bottom left, line underneath
+    local t = s * 0.5
+    ImGui.DrawList_AddLine(dl, cx + s * 0.85, cy - s * 0.85, cx - s * 0.35, cy + s * 0.35, col, t)
+    ImGui.DrawList_AddTriangleFilled(dl, cx - s * 0.75, cy + s * 0.75, cx - s * 0.7, cy + s * 0.05, cx - s * 0.05, cy + s * 0.7, col)
+    ImGui.DrawList_AddLine(dl, cx - s * 0.2, cy + s * 0.95, cx + s, cy + s * 0.95, col, s * 0.2)
   end
 end
 
@@ -1874,11 +1880,31 @@ local function drawClip(c, i, activeClip, shared)
   if cfg.showFiles then name = name .. '   (' .. c.takeName .. ')' end
   -- Presentation: room for the remove x at the end of the row
   local xW = c.inPres and math.floor(btnH * 0.75) or 0
-  local nameW = math.max(80, ImGui.GetContentRegionAvail(ctx) - timeW - 10 - (xW > 0 and xW + 10 or 0))
+  local editW = math.floor(btnH * 0.75)       -- room for the rename pencil
+  local nameW = math.max(80, ImGui.GetContentRegionAvail(ctx) - timeW - 10 - (editW + 10) - (xW > 0 and xW + 10 or 0))
+  local editing = PB.inlineRename and PB.inlineRename.key == c.key
   ImGui.PushFont(ctx, font, cfg.buttonSize)
-  ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0, 0.5)
-  if coloredButton(name .. '##clip' .. i, nameW, btnH, style) then anchorRow(c); toggleClip(c) end
-  ImGui.PopStyleVar(ctx)
+  if editing then
+    -- Track name edited in place. Enter or clicking away saves, Esc cancels.
+    local d = PB.inlineRename
+    if d.focus then ImGui.SetKeyboardFocusHere(ctx); d.focus = false end
+    ImGui.SetNextItemWidth(ctx, nameW)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 8, math.max(2, (btnH - ImGui.GetTextLineHeight(ctx)) / 2))
+    local _
+    _, d.text = ImGui.InputText(ctx, '##inlinerename' .. i, d.text)
+    ImGui.PopStyleVar(ctx)
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_Escape, false) then
+      PB.inlineRename = nil
+    elseif ImGui.IsItemDeactivated(ctx) then
+      local t = d.text:gsub('^%s+', ''):gsub('%s+$', '')
+      if t ~= '' and t ~= c.trackName then PB.saveRename({ kind = 'track', obj = c.track, text = t }) end
+      PB.inlineRename = nil
+    end
+  else
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0, 0.5)
+    if coloredButton(name .. '##clip' .. i, nameW, btnH, style) then anchorRow(c); toggleClip(c) end
+    ImGui.PopStyleVar(ctx)
+  end
   ImGui.PopFont(ctx)
   PB.clipMenu(c, i)
   ImGui.SameLine(ctx)
@@ -1896,11 +1922,24 @@ local function drawClip(c, i, activeClip, shared)
   ImGui.DrawList_AddText(dl, tx + (timeW - tw) / 2, ty + (btnH - th) / 2, tcol, txt)
   ImGui.PopFont(ctx)
 
+  -- Rename pencil: shown while the mouse is over the row (space is kept so
+  -- nothing shifts). Renames the track, i.e. the clip's button label.
+  ImGui.SameLine(ctx, 0, 10)
+  local rowRight = tx + timeW + editW + 12 + (xW > 0 and xW + 10 or 0)
+  if not editing and ImGui.IsMouseHoveringRect(ctx, rowX, rowY, rowRight, rowY + btnH) then
+    if iconButton('rename' .. i, 'edit', editW, nil, COL.iconDim) then
+      PB.inlineRename = { key = c.key, text = c.trackName, focus = true }
+    end
+    if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Rename this track (the button label)') end
+  else
+    ImGui.Dummy(ctx, editW, btnH)
+  end
+
   -- Presentation: remove x at the end of the row, shown while the mouse is
   -- over the row (the space is kept so nothing shifts)
   if xW > 0 then
     ImGui.SameLine(ctx, 0, 10)
-    if ImGui.IsMouseHoveringRect(ctx, rowX, rowY, tx + timeW + xW + 12, rowY + btnH) then
+    if ImGui.IsMouseHoveringRect(ctx, rowX, rowY, rowRight, rowY + btnH) then
       if coloredButton('x##rmclip' .. i, xW, btnH) then PB.removeClips({ c }) end
       if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Remove from the presentation (Ctrl+Z to undo)') end
     else

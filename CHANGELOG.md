@@ -1,5 +1,8 @@
 # Changelog
 
+## 4.5
+- Rename a track right in the panel: hover a clip row and click the pencil. The name turns into a box (Enter or click away saves, Esc cancels). Undoable.
+
 ## 4.4
 - Rename tracks, takes and folders from the panel (right-click a clip or a folder header).
 - Folder colour from the folder header's right-click menu.
