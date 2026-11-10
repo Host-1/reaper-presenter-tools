@@ -225,10 +225,16 @@ local function popKind(kind, n)
   end
 end
 local function opener(kind, fname)       -- Push*/Begin* that always opens
-  return function(c, ...) OPEN[#OPEN + 1] = { kind = kind }; return Real[fname](c, ...) end
+  return function(c, ...) local r = Real[fname](c, ...); OPEN[#OPEN + 1] = { kind = kind }; return r end
 end
 local function closer(kind, fname)
-  return function(c, n) popKind(kind, (fname == 'PopStyleVar' or fname == 'PopStyleColor') and n or 1); return Real[fname](c, n) end
+  local counted = fname == 'PopStyleVar' or fname == 'PopStyleColor'
+  return function(c, n)       -- the real pop first: if it throws, the entry stays open for the unwind to retry
+    local r
+    if counted and n ~= nil then r = Real[fname](c, n) else r = Real[fname](c) end
+    popKind(kind, counted and n or 1)
+    return r
+  end
 end
 local function beginner(kind, fname)     -- Begin* that opens only when it returns true
   return function(c, ...)
@@ -238,16 +244,17 @@ local function beginner(kind, fname)     -- Begin* that opens only when it retur
   end
 end
 ImGui = setmetatable({
-  PushStyleVar = function(c, ...) OPEN[#OPEN + 1] = { kind = 'sv' }; return Real.PushStyleVar(c, ...) end,
+  PushStyleVar = function(c, ...) local r = Real.PushStyleVar(c, ...); OPEN[#OPEN + 1] = { kind = 'sv' }; return r end,
   PopStyleVar = closer('sv', 'PopStyleVar'),
-  PushStyleColor = function(c, ...) OPEN[#OPEN + 1] = { kind = 'sc' }; return Real.PushStyleColor(c, ...) end,
+  PushStyleColor = function(c, ...) local r = Real.PushStyleColor(c, ...); OPEN[#OPEN + 1] = { kind = 'sc' }; return r end,
   PopStyleColor = closer('sc', 'PopStyleColor'),
   PushFont = opener('font', 'PushFont'), PopFont = closer('font', 'PopFont'),
   PushID = opener('id', 'PushID'), PopID = closer('id', 'PopID'),
+  PushTextWrapPos = opener('wrap', 'PushTextWrapPos'), PopTextWrapPos = closer('wrap', 'PopTextWrapPos'),
   BeginDisabled = opener('dis', 'BeginDisabled'), EndDisabled = closer('dis', 'EndDisabled'),
   BeginGroup = opener('group', 'BeginGroup'), EndGroup = closer('group', 'EndGroup'),
-  Indent = function(c, w) OPEN[#OPEN + 1] = { kind = 'ind', w = w }; return Real.Indent(c, w) end,
-  Unindent = function(c, w) popKind('ind'); return Real.Unindent(c, w) end,
+  Indent = function(c, w) local r = Real.Indent(c, w); OPEN[#OPEN + 1] = { kind = 'ind', w = w }; return r end,
+  Unindent = function(c, w) local r = Real.Unindent(c, w); popKind('ind'); return r end,
   BeginChild = beginner('child', 'BeginChild'), EndChild = closer('child', 'EndChild'),
   BeginPopup = beginner('popup', 'BeginPopup'), BeginPopupModal = beginner('popup', 'BeginPopupModal'),
   BeginPopupContextItem = beginner('popup', 'BeginPopupContextItem'), EndPopup = closer('popup', 'EndPopup'),
@@ -261,7 +268,7 @@ ImGui = setmetatable({
   TreePop = closer('tree', 'TreePop'),
 }, { __index = Real })
 
-local UNWIND = { sv = 'PopStyleVar', sc = 'PopStyleColor', font = 'PopFont', id = 'PopID', dis = 'EndDisabled',
+local UNWIND = { sv = 'PopStyleVar', sc = 'PopStyleColor', font = 'PopFont', id = 'PopID', wrap = 'PopTextWrapPos', dis = 'EndDisabled',
   group = 'EndGroup', child = 'EndChild', popup = 'EndPopup', dds = 'EndDragDropSource', ddt = 'EndDragDropTarget',
   tree = 'TreePop' }
 openCount = function() return #OPEN end

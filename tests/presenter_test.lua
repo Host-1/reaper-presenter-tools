@@ -444,6 +444,59 @@ test("blind: turning Blind on clears the status line (no track name stays up)", 
   ok(not everything_drawn(H):find("Note saved on", 1, true), "status line is gone")
 end)
 
+------------------------------------------- a throw inside the drawing, at any call --
+-- Real ReaImGui stops the script when End() finds a Push/Begin left open ("ImGui_End: Missing PopFont()"). The panel's
+-- draw guard must close everything a failed frame left open, whichever call throws (also a Push or a Pop itself).
+local function throw_at(setup, k)
+  local H = load_harness().start{ session = false }
+  local FR = H.FR
+  FR.region(0, 10, "R1")
+  local a, b = FR.track{ name = "ZZa" }, FR.track{ name = "ZZb" }
+  local d = FR.track{ name = "ZZl", freemode = 2, nlanes = 2, lanenames = { "x", "y" } }
+  FR.item{ track = a, pos = 0, len = 5, notes = "n", takes = { { name = "t", markers = { { pos = 1, name = "m" } } } } }
+  FR.item{ track = b, pos = 0, len = 5, takes = { { name = "t1" }, { name = "t2" } } }
+  FR.item{ track = d, pos = 0, len = 4, lane = 0, takes = { { name = "l1" } } }
+  FR.item{ track = d, pos = 0, len = 4, lane = 1, takes = { { name = "l2" } } }
+  setup(H)
+  local api, orig = H.FI.api, {}
+  for name, f in pairs(api) do if type(f) == "function" then orig[name] = f end end
+  local n, active, thrown = 0, false, nil
+  for name, f in pairs(orig) do
+    rawset(api, name, function(...)
+      if name == "GetWindowSize" then active = false end      -- the panel's own code after the guarded drawing
+      if active and name ~= "End" then
+        n = n + 1
+        if n == k then thrown = name; error("injected failure in " .. name, 2) end
+      end
+      local r = table.pack(f(...))
+      if name == "IsWindowDocked" then active = true end      -- from here on, the guarded drawing
+      return table.unpack(r, 1, r.n)
+    end)
+  end
+  H.FI.hover_all = true
+  H.frame(1)
+  for name, f in pairs(orig) do rawset(api, name, f) end
+  H.frame(2)
+  return n, thrown
+end
+local fault_states = {
+  plain = function(H) H.frame(2) end,
+  blind = function(H) H.FI.clicks["      Blind##togBlind"] = true; H.frame(3) end,
+  compact = function(H) H.FI.clicks["      Compact view##togCompact view"] = true; H.frame(3) end,
+  note_popup = function(H) H.frame(2); key(H, "Key_N"); H.frame(2) end,
+  settings_popup = function(H) H.frame(2); H.FI.api.OpenPopup(nil, "Settings##presenter"); H.frame(2) end,
+}
+for _, sname in ipairs({ "plain", "blind", "compact", "note_popup", "settings_popup" }) do
+  test("a failure at any call while drawing (" .. sname .. ") leaves nothing open for End()", function()
+    local total = throw_at(fault_states[sname], 1e9)
+    ok(total > 50, "the frame makes calls")
+    for k = 1, total, 5 do
+      local okr, err = pcall(throw_at, fault_states[sname], k)
+      if not okr then error(("call %d of %d: %s"):format(k, total, tostring(err))) end
+    end
+  end)
+end
+
 test("blind: colours are neutral, no waveform, no total length, nothing to rename", function()
   local H = blind_session(); H.FI.hover_all = true
   H.FI.clicks["      Blind##togBlind"] = true; H.frame(3)
