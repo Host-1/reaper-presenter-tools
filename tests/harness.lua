@@ -25,7 +25,12 @@ function H.start(opts)
   opts = opts or {}
   FAKE_IMGUI = {}
   package.loaded.imgui = nil                     -- the panel's `require 'imgui'` must get THIS fake
-  dofile(HERE .. "/fake_imgui/imgui.lua")        -- defines the fake and registers FAKE_IMGUI.api
+  -- hardened fake (the Verifier's file, unchanged) + the presenter layer, loaded once when the panel requires it
+  package.preload.imgui = function()
+    local mod = dofile(HERE .. "/fake_imgui/imgui.lua")
+    dofile(HERE .. "/fake_imgui/presenter_layer.lua")
+    return mod
+  end
   H.FI = FAKE_IMGUI
   H.FR = dofile(HERE .. "/fake_reaper.lua")
   H.FR.reset()
@@ -42,11 +47,10 @@ end
 function H.frame(n)
   for _ = 1, n or 1 do
     local FI = H.FI
-    FI.seq, FI.cursor_y, FI.frames = {}, 0, FI.frames + 1
-    FI.begin_log, FI.child_log, FI.texts, FI.buttons, FI.selectables = {}, {}, {}, {}, {}
+    FI.reset_frame()
     H.FR.now = (H.FR.now or 100) + 0.05
     H.FR.run_frame()
-    FI.check_frame_end()
+    FI.end_frame()
   end
 end
 function H.pending() return #H.FR.defers > 0 end

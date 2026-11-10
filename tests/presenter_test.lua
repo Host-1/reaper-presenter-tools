@@ -52,7 +52,7 @@ test("window flags: no scrollbar / wheel-scroll in full view, none set in compac
 end)
 
 test("child clipped out (BeginChild false): no EndChild, still balanced", function()
-  local H = new(); H.FI.child_clipped.presenterBody = true; H.frame(3)
+  local H = new(); H.FI.hidden_children.presenterBody = true; H.frame(3)
 end)
 
 test("tiny window (no room): body is drawn without a child, still balanced", function()
