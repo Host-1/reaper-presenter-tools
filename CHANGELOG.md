@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (4.6 work; folded into the single release entry by T-011)
+- Pinned toolbar: the view tabs, region tabs and the play / A/B / Loop row stay at the top while the clips scroll underneath.
+- Collapsing the window with its title-bar arrow and opening it again now brings it back to the size it had, instead of staying tiny.
+- The window size is remembered between sessions (full view only; compact view still fits its own height).
+- Keys (1-9, Space, A, S, L, C, M, N, arrows) only work while the panel has the keyboard focus and no popup is open.
+
 ## 4.5
 - Rename a track right in the panel: hover a clip row and click the pencil. The name turns into a box (Enter or click away saves, Esc cancels). Undoable.
 

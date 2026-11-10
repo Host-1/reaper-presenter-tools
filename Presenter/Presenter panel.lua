@@ -215,6 +215,8 @@ local cfg = {
   noteImgHeight = loadNum('noteImgHeight', 200),
   normMode     = loadNum('normMode', 1),
   normTarget   = loadNum('normTarget', -23),
+  sizeW        = loadNum('sizeW', 760),    -- window size, remembered (full view, floating only)
+  sizeH        = loadNum('sizeH', 680),
   notesOpen    = loadBool('notesOpen', false),
   showFiles    = loadBool('showFiles', false),
   showAllWaves = loadBool('showAllWaves', false),
@@ -224,7 +226,7 @@ local cfg = {
   loop         = false,   -- per session, not remembered
 }
 local function saveCfg()
-  for _, k in ipairs({ 'textSize', 'buttonSize', 'tabSize', 'waveHeight', 'preroll', 'noteImgHeight', 'normMode', 'normTarget' }) do
+  for _, k in ipairs({ 'textSize', 'buttonSize', 'tabSize', 'waveHeight', 'preroll', 'noteImgHeight', 'normMode', 'normTarget', 'sizeW', 'sizeH' }) do
     reaper.SetExtState(EXT, k, tostring(cfg[k]), true)
   end
   for _, k in ipairs({ 'showFiles', 'showAllWaves', 'ab', 'folders', 'restoreOnClose', 'notesOpen' }) do
@@ -1212,6 +1214,20 @@ end
 
 -- Remember where a clip's row is on screen, so the list can be scrolled back
 -- if the layout above it changes (e.g. the waveform moving to another clip)
+-- Scrolling acts on the CURRENT window, and the clips live in the 'presenterBody'
+-- child. inBody is true only while the clip list is being drawn; a call from
+-- anywhere else (toolbar, keyboard section) is queued and applied inside the child
+-- next frame, so it can never scroll the pinned toolbar.
+local inBody = false
+local pendingScrollDy = 0
+local function scrollBodyBy(dy)
+  if inBody then
+    ImGui.SetScrollY(ctx, math.max(0, ImGui.GetScrollY(ctx) + dy))
+  else
+    pendingScrollDy = pendingScrollDy + dy
+  end
+end
+
 local function anchorRow(c)
   if not (c and rowYs[c.key]) then return end
   scrollAnchor = { key = c.key, y = rowYs[c.key] }
@@ -1225,7 +1241,7 @@ local function anchorRow(c)
   if old and old ~= c.key and not cfg.showAllWaves and rowSeen[old] == frameNo
       and rowYs[old] and rowYs[old] < rowYs[c.key] and blockH.wave and blockH.seek then
     local dy = blockH.wave - blockH.seek
-    if dy > 0 then ImGui.SetScrollY(ctx, math.max(0, ImGui.GetScrollY(ctx) - dy)) end
+    if dy > 0 then scrollBodyBy(-dy) end
   end
 end
 
@@ -1854,7 +1870,7 @@ local function drawClip(c, i, activeClip, shared)
   -- something above it changed height), scroll so it's back where it was
   if scrollAnchor and scrollAnchor.key == c.key then
     local dy = rowY - scrollAnchor.y
-    if math.abs(dy) > 1 then ImGui.SetScrollY(ctx, ImGui.GetScrollY(ctx) + dy) end
+    if math.abs(dy) > 1 then scrollBodyBy(dy) end
     scrollAnchor = nil
   end
   rowYs[c.key] = rowY
@@ -2166,12 +2182,13 @@ end
 -- from the window's own collapse arrow, which is left as it is.)
 local compact = false
 local fullSize, restoreSize, compactH, winW, winH = nil, nil, nil, nil, nil
-local resetScroll = false
+local resetScroll = false   -- compact: the window itself scrolls, reset it
+local resetBody = false     -- full: reset the clip list's own scroll (inside the child)
 
 local function toggleCompact()
   if not compact then
     fullSize = { winW or 760, winH or 680 }
-    compact, compactH, resetScroll = true, nil, true
+    compact, compactH, resetScroll, resetBody = true, nil, true, true
   else
     compact = false
     restoreSize = fullSize
@@ -3724,10 +3741,26 @@ local function draw()
   end
   ImGui.Spacing(ctx)
 
+  local bodyOpen = false
   if compact then
     ImGui.Separator(ctx)
     drawClipChips(clips, activeClip)
   else
+  -- Everything above stays put; the region text and the clips scroll in a child
+  -- window. (Skipped when there is almost no room, so the window itself is used.)
+  ImGui.Separator(ctx)
+  local _, availH = ImGui.GetContentRegionAvail(ctx)
+  if availH > 60 then
+    bodyOpen = ImGui.BeginChild(ctx, 'presenterBody', 0, 0)
+  end
+  inBody = true
+  if bodyOpen then
+    if pendingScrollDy ~= 0 then   -- scroll requested from outside the child
+      ImGui.SetScrollY(ctx, math.max(0, ImGui.GetScrollY(ctx) + pendingScrollDy))
+    end
+    if resetBody then ImGui.SetScrollY(ctx, 0) end
+  end
+  pendingScrollDy, resetBody = 0, false
   ------------------------------------------------ title and text
   -- Where this trial sits, for nested regions: "Round 1 / Jo"
   if region and region.parent then
@@ -3813,10 +3846,16 @@ local function draw()
     end
   end
 
+  inBody = false
+  if bodyOpen then ImGui.EndChild(ctx) end   -- BeginChild closes itself when it returns false
   end -- compact / full
 
   ------------------------------------------------ keyboard
-  if not ImGui.IsAnyItemActive(ctx) then
+  -- Only while this panel has the keyboard focus and no popup is open (IsKeyPressed
+  -- itself ignores focus, so without this the keys fire from other REAPER windows)
+  local keysOn = ImGui.IsWindowFocused(ctx, ImGui.FocusedFlags_RootAndChildWindows)
+    and not ImGui.IsPopupOpen(ctx, '', ImGui.PopupFlags_AnyPopup)
+  if keysOn and not ImGui.IsAnyItemActive(ctx) then
     for i, key in ipairs(KEYS) do
       if clips[i] and ImGui.IsKeyPressed(ctx, key, false) then anchorRow(clips[i]); toggleClip(clips[i]) end
     end
@@ -3847,16 +3886,25 @@ local function draw()
 end
 
 -------------------------------------------------------------------- loop --
+local lastOpenSize = nil   -- the size the floating window had when last open
 local function loop()
   refresh()
+  -- save the size shortly after the user stops resizing (not on every frame)
+  if PB.sizeDirtyAt and reaper.time_precise() - PB.sizeDirtyAt > 1 then PB.sizeDirtyAt = nil; saveCfg() end
   watchPlayback()
 
-  ImGui.SetNextWindowSize(ctx, 760, 680, ImGui.Cond_FirstUseEver)
+  -- First open: the remembered size (clamped). The window's own size is kept by
+  -- ReaImGui after that.
+  ImGui.SetNextWindowSize(ctx, clamp(cfg.sizeW, 320, 4000), clamp(cfg.sizeH, 200, 4000), ImGui.Cond_FirstUseEver)
   if compact and compactH then
     ImGui.SetNextWindowSize(ctx, winW or 760, compactH, ImGui.Cond_Always)
   elseif restoreSize then
     ImGui.SetNextWindowSize(ctx, restoreSize[1], restoreSize[2], ImGui.Cond_Always)
     restoreSize = nil
+  elseif PB.collapsedLast and lastOpenSize then
+    -- The window was collapsed with its title-bar arrow: keep re-sending the size it
+    -- had when open, so expanding it brings that size back instead of a tiny window.
+    ImGui.SetNextWindowSize(ctx, lastOpenSize[1], lastOpenSize[2], ImGui.Cond_Always)
   end
   ImGui.PushFont(ctx, font, 18)
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowPadding, 18, 16)
@@ -3864,12 +3912,27 @@ local function loop()
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_ItemSpacing, 10, 8)
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, 6)
 
-  local visible, open = ImGui.Begin(ctx, SCRIPT_NAME, true)
+  -- No window scrollbar in full view: the clips scroll in their own child
+  local winFlags = compact and ImGui.WindowFlags_None
+    or (ImGui.WindowFlags_NoScrollbar | ImGui.WindowFlags_NoScrollWithMouse)
+  local visible, open = ImGui.Begin(ctx, SCRIPT_NAME, true, winFlags)
+  -- Begin returns false both when collapsed and when docked in a tab that isn't showing
+  -- (ReaImGui has no working IsWindowCollapsed). Floating last frame + not visible = collapsed;
+  -- docked last frame = hidden dock tab, so the size is left alone.
+  PB.collapsedLast = (not visible) and not PB.dockedLast
   if visible then
+    PB.dockedLast = ImGui.IsWindowDocked(ctx)
     if resetScroll then ImGui.SetScrollY(ctx, 0); resetScroll = false end
     draw()
     prefetch(cache.curS)
     winW, winH = ImGui.GetWindowSize(ctx)
+    if not PB.dockedLast then
+      lastOpenSize = { winW, winH }
+      if not compact and (cfg.sizeW ~= winW or cfg.sizeH ~= winH) then   -- full view, floating only
+        cfg.sizeW, cfg.sizeH = winW, winH
+        PB.sizeDirtyAt = reaper.time_precise()
+      end
+    end
     -- compact: fit the window's height to what was drawn (width stays yours)
     if compact then compactH = ImGui.GetCursorPosY(ctx) + 8 end
     ImGui.End(ctx)   -- only when visible: ReaImGui ends a hidden window itself
