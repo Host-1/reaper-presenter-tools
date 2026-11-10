@@ -33,15 +33,85 @@ function FI.user_resize(w, h) FI.win.size_full = { w, h } end
 function FI.dock(hidden) FI.win.docked, FI.win.dock_hidden = true, hidden or false end
 function FI.undock() FI.win.docked, FI.win.dock_hidden = false, false end
 
+local fonts, vars, lay = {}, {}, {}
 local reset_frame = FI.reset_frame
 function FI.reset_frame()
   reset_frame()
   FI.seq, FI.begin_log, FI.child_log, FI.sy = {}, {}, {}, 0
+  FI.toolbar_h, FI.body_h = nil, nil
+  for k in pairs(lay) do lay[k] = nil end
 end
 
 -- window / child stack of this layer (names and kinds), for GetWindowSize / GetContentRegionAvail / SetScrollY
 local stack = {}
 local function top() return stack[#stack] end
+-- A small layout model, to MEASURE vertical space (not pixel-exact: ImGui's rules for the heights that matter here).
+-- Frame widgets are font size + 2 * FramePadding.y tall, text is font size, explicit heights win, a new line adds
+-- ItemSpacing.y, SameLine keeps the line (taller item wins). The body child's content height ends up in FI.body_h and
+-- everything above the child in FI.toolbar_h.
+local VAR_PAD, VAR_SP = C("StyleVar_FramePadding"), C("StyleVar_ItemSpacing")
+local function eff(var, dx, dy)
+  for i = #vars, 1, -1 do if vars[i].var == var then return vars[i].x, vars[i].y or vars[i].x end end
+  return dx, dy
+end
+local function fsz() return fonts[#fonts] or 13 end
+local function frame_h() local _, py = eff(VAR_PAD, 4, 3); return fsz() + 2 * py end
+local function spacing_y() local _, sy = eff(VAR_SP, 8, 4); return sy end
+local function path_key() local k = {} for _, e in ipairs(stack) do k[#k + 1] = e.name end return table.concat(k, "/") end
+local function L() local k = path_key(); lay[k] = lay[k] or { y = 0, lineH = 0, started = false, same = false }; return lay[k] end
+local function item(h)
+  local l = L()
+  if l.same then l.lineH = math.max(l.lineH, h); l.same = false
+  else
+    if l.started then l.y = l.y + l.lineH + spacing_y() end
+    l.lineH, l.started = h, true
+  end
+end
+local function extent(k) local l = lay[k]; return l and (l.y + l.lineH) or 0 end
+FI.layout_extent = extent
+
+local o_pushvar, o_popvar = api.PushStyleVar, api.PopStyleVar
+function api.PushStyleVar(ctx, var, x, y) vars[#vars + 1] = { var = var, x = x, y = y }; return o_pushvar(ctx, var, x, y) end
+function api.PopStyleVar(ctx, n) for _ = 1, (n or 1) do vars[#vars] = nil end return o_popvar(ctx, n) end
+local o_pushfont, o_popfont = api.PushFont, api.PopFont
+function api.PushFont(ctx, f, size) fonts[#fonts + 1] = size; return o_pushfont(ctx, f, size) end
+function api.PopFont(ctx) fonts[#fonts] = nil; return o_popfont(ctx) end
+local o_same = api.SameLine
+function api.SameLine(ctx, ...) L().same = true; return o_same(ctx, ...) end
+function api.Spacing(ctx) item(0) end
+function api.Separator(ctx) item(1) end
+function api.Dummy(ctx, w, h) item(h or 0) end
+
+local HEIGHT = {
+  Button = function(w, h) return (h and h > 0) and h or frame_h() end,
+  InvisibleButton = function(w, h) return h or 0 end,
+}
+HEIGHT.SmallButton = function() return fsz() + 2 * 0 + 2 end
+HEIGHT.ArrowButton = frame_h
+HEIGHT.Checkbox, HEIGHT.RadioButton, HEIGHT.SliderDouble, HEIGHT.SliderInt, HEIGHT.InputText = frame_h, frame_h, frame_h, frame_h, frame_h
+HEIGHT.Selectable = function() return fsz() end
+HEIGHT.MenuItem = frame_h
+HEIGHT.TreeNodeEx = frame_h
+local ARGS = { Button = 3, InvisibleButton = 3 }   -- widgets whose 3rd/4th args are w, h (after ctx, label)
+-- widget labels in draw order
+for _, name in ipairs({ "Button", "SmallButton", "InvisibleButton", "ArrowButton", "Selectable", "Checkbox", "RadioButton",
+    "MenuItem", "TreeNodeEx", "SliderDouble", "SliderInt", "InputText" }) do
+  local f = api[name]
+  api[name] = function(ctx, label, a, b, ...)
+    FI.seq[#FI.seq + 1] = label
+    if HEIGHT[name] then
+      local h = HEIGHT[name]
+      if name == "Button" or name == "InvisibleButton" then item(h(a, b)) else item(h()) end
+    end
+    return f(ctx, label, a, b, ...)
+  end
+end
+local o_text = api.Text
+for _, name in ipairs({ "Text", "TextWrapped", "TextDisabled", "TextColored", "SeparatorText" }) do
+  local f = api[name]
+  api[name] = function(...) item(fsz()); return f(...) end
+end
+
 local pending, pending_call = nil, nil
 
 local o_next = api.SetNextWindowSize
@@ -81,10 +151,17 @@ local o_child, o_endchild = api.BeginChild, api.EndChild
 function api.BeginChild(ctx, id, w, h, cf, wf)
   FI.child_log[#FI.child_log + 1] = { id = id, w = w, h = h, frame = FI.frame }
   local ok = o_child(ctx, id, w, h, cf, wf)
-  if ok then stack[#stack + 1] = { name = id, kind = "child" }; FI.seq[#FI.seq + 1] = "child:" .. id end
+  if ok then
+    FI.toolbar_h = FI.toolbar_h or extent(path_key())
+    stack[#stack + 1] = { name = id, kind = "child" }; FI.seq[#FI.seq + 1] = "child:" .. id
+    lay[path_key()] = nil
+  end
   return ok
 end
-function api.EndChild(ctx) o_endchild(ctx); stack[#stack] = nil end
+function api.EndChild(ctx)
+  FI.body_h = extent(path_key())
+  o_endchild(ctx); stack[#stack] = nil
+end
 
 local o_scroll = api.SetScrollY
 function api.SetScrollY(ctx, y)
@@ -105,16 +182,6 @@ function api.GetContentRegionAvail(ctx)
   return FI.avail_w or (w[1] - 36), FI.avail_h or (w[2] - 120)
 end
 function api.GetCursorScreenPos() FI.sy = FI.sy + 40; return 0, FI.sy + FI.row_shift end
-
--- widget labels in draw order
-for _, name in ipairs({ "Button", "SmallButton", "InvisibleButton", "ArrowButton", "Selectable", "Checkbox", "RadioButton",
-    "MenuItem", "TreeNodeEx", "SliderDouble", "SliderInt", "InputText" }) do
-  local f = api[name]
-  api[name] = function(ctx, label, ...)
-    FI.seq[#FI.seq + 1] = label
-    return f(ctx, label, ...)
-  end
-end
 
 -- popups: AnyPopup = AnyPopupId | AnyPopupLevel; IsPopupOpen(ctx, '', AnyPopupId) = "is any popup open"
 rawset(api, "PopupFlags_AnyPopup", C("PopupFlags_AnyPopupId") | C("PopupFlags_AnyPopupLevel"))
