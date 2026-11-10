@@ -39,6 +39,7 @@ function FI.reset_frame()
   reset_frame()
   FI.seq, FI.begin_log, FI.child_log, FI.sy = {}, {}, {}, 0
   FI.toolbar_h, FI.body_h = nil, nil
+  FI.draw_texts, FI.bcol = {}, {}
   for k in pairs(lay) do lay[k] = nil end
 end
 
@@ -93,12 +94,21 @@ HEIGHT.Selectable = function() return fsz() end
 HEIGHT.MenuItem = frame_h
 HEIGHT.TreeNodeEx = frame_h
 local ARGS = { Button = 3, InvisibleButton = 3 }   -- widgets whose 3rd/4th args are w, h (after ctx, label)
+-- colours: FI.bcol[label] = the Col_Button colour in force when that button was drawn; FI.draw_texts = DrawList_AddText strings
+local colstack = {}
+local o_psc, o_ppc = api.PushStyleColor, api.PopStyleColor
+function api.PushStyleColor(ctx, col, val) colstack[#colstack + 1] = { col, val }; return o_psc(ctx, col, val) end
+function api.PopStyleColor(ctx, n) for _ = 1, (n or 1) do colstack[#colstack] = nil end return o_ppc(ctx, n) end
+local function cur_col(col) for i = #colstack, 1, -1 do if colstack[i][1] == col then return colstack[i][2] end end end
+FI.bcol, FI.draw_texts = {}, {}
+function api.DrawList_AddText(dl, x, y, col, text) FI.draw_texts[#FI.draw_texts + 1] = tostring(text) end
 -- widget labels in draw order
 for _, name in ipairs({ "Button", "SmallButton", "InvisibleButton", "ArrowButton", "Selectable", "Checkbox", "RadioButton",
     "MenuItem", "TreeNodeEx", "SliderDouble", "SliderInt", "InputText" }) do
   local f = api[name]
   api[name] = function(ctx, label, a, b, ...)
     FI.seq[#FI.seq + 1] = label
+    FI.bcol[label] = cur_col(C("Col_Button"))
     if HEIGHT[name] then
       local h = HEIGHT[name]
       if name == "Button" or name == "InvisibleButton" then item(h(a, b)) else item(h()) end

@@ -21,10 +21,10 @@ local function key(H, name) H.FI.keys[H.FI.api[name]] = true end
 local function pressed_any(H) return H.FR.playstate ~= 0 or H.FR.cursor ~= 0 end
 
 ----------------------------------------------------------------- layout --
-test("session content: 3 regions, a 3-take item and a 2-lane track show as clips", function()
+test("session content: 3 regions, a 3-take item (one row, 3 chips) and a 2-lane track (header + 2 thin rows)", function()
   local H = new(); H.frame(3)
   local seq = table.concat(H.FI.seq, "|")
-  for _, want in ipairs({ "Region 1##lvl1_1", "Region 3##lvl1_3", "take 3##clip4", "dry##clip5", "wet##clip6" }) do
+  for _, want in ipairs({ "Region 1##lvl1_1", "Region 3##lvl1_3", "t3##take2_3", "L1  dry##lane3_1", "L2  wet##lane3_2" }) do
     ok(seq:find(want, 1, true), "missing " .. want)
   end
 end)
@@ -150,7 +150,7 @@ end)
 test("scroll (bug 3): every SetScrollY lands inside the child, never on the pinned window", function()
   local H = new(); H.frame(3)
   -- a click on a clip row, then the row moves on screen (layout above it changed): the anchor scrolls the list back
-  H.FI.clicks["2     A2  |  take 1##clip2"] = true; H.frame(1)
+  H.FI.clicks["2     A2##clip2"] = true; H.frame(1)
   H.FI.row_shift = 25; H.frame(2)
   -- keyboard (drawn outside the child) asks to anchor too
   key(H, "Key_3"); H.frame(2)

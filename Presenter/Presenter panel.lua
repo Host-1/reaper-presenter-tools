@@ -193,6 +193,69 @@ if not okImGui then
   return
 end
 
+-- Draw-error guard: every Push*/Begin* that is still open is remembered, so that if drawing fails half way the
+-- panel can close them again (a script error stops the whole panel in real ReaImGui when End finds them open).
+local UI = {}   -- helpers for takes / lanes / blind mode (one table: the main chunk is at Lua's 200-local limit)
+local openCount, unwindOpen   -- set by the block below
+do
+local OPEN = {}
+local Real = ImGui
+local function popKind(kind, n)
+  for _ = 1, n or 1 do
+    for i = #OPEN, 1, -1 do if OPEN[i].kind == kind then table.remove(OPEN, i) break end end
+  end
+end
+local function opener(kind, fname)       -- Push*/Begin* that always opens
+  return function(c, ...) OPEN[#OPEN + 1] = { kind = kind }; return Real[fname](c, ...) end
+end
+local function closer(kind, fname)
+  return function(c, n) popKind(kind, (fname == 'PopStyleVar' or fname == 'PopStyleColor') and n or 1); return Real[fname](c, n) end
+end
+local function beginner(kind, fname)     -- Begin* that opens only when it returns true
+  return function(c, ...)
+    local ok, a = Real[fname](c, ...)
+    if ok then OPEN[#OPEN + 1] = { kind = kind } end
+    return ok, a
+  end
+end
+ImGui = setmetatable({
+  PushStyleVar = function(c, ...) OPEN[#OPEN + 1] = { kind = 'sv' }; return Real.PushStyleVar(c, ...) end,
+  PopStyleVar = closer('sv', 'PopStyleVar'),
+  PushStyleColor = function(c, ...) OPEN[#OPEN + 1] = { kind = 'sc' }; return Real.PushStyleColor(c, ...) end,
+  PopStyleColor = closer('sc', 'PopStyleColor'),
+  PushFont = opener('font', 'PushFont'), PopFont = closer('font', 'PopFont'),
+  PushID = opener('id', 'PushID'), PopID = closer('id', 'PopID'),
+  BeginDisabled = opener('dis', 'BeginDisabled'), EndDisabled = closer('dis', 'EndDisabled'),
+  BeginGroup = opener('group', 'BeginGroup'), EndGroup = closer('group', 'EndGroup'),
+  Indent = function(c, w) OPEN[#OPEN + 1] = { kind = 'ind', w = w }; return Real.Indent(c, w) end,
+  Unindent = function(c, w) popKind('ind'); return Real.Unindent(c, w) end,
+  BeginChild = beginner('child', 'BeginChild'), EndChild = closer('child', 'EndChild'),
+  BeginPopup = beginner('popup', 'BeginPopup'), BeginPopupModal = beginner('popup', 'BeginPopupModal'),
+  BeginPopupContextItem = beginner('popup', 'BeginPopupContextItem'), EndPopup = closer('popup', 'EndPopup'),
+  BeginDragDropSource = beginner('dds', 'BeginDragDropSource'), EndDragDropSource = closer('dds', 'EndDragDropSource'),
+  BeginDragDropTarget = beginner('ddt', 'BeginDragDropTarget'), EndDragDropTarget = closer('ddt', 'EndDragDropTarget'),
+  TreeNodeEx = function(c, id, label, flags, ...)
+    local open = Real.TreeNodeEx(c, id, label, flags, ...)
+    if open and ((flags or 0) & Real.TreeNodeFlags_NoTreePushOnOpen) == 0 then OPEN[#OPEN + 1] = { kind = 'tree' } end
+    return open
+  end,
+  TreePop = closer('tree', 'TreePop'),
+}, { __index = Real })
+
+local UNWIND = { sv = 'PopStyleVar', sc = 'PopStyleColor', font = 'PopFont', id = 'PopID', dis = 'EndDisabled',
+  group = 'EndGroup', child = 'EndChild', popup = 'EndPopup', dds = 'EndDragDropSource', ddt = 'EndDragDropTarget',
+  tree = 'TreePop' }
+openCount = function() return #OPEN end
+-- Close whatever a failed drawing left open, newest first, down to `mark` entries
+unwindOpen = function(c, mark)
+  while #OPEN > mark do
+    local e = table.remove(OPEN)
+    if e.kind == 'ind' then pcall(Real.Unindent, c, e.w)
+    else pcall(Real[UNWIND[e.kind]], c) end
+  end
+end
+end
+
 -- Running the action again closes the panel (REAPER 7.03+)
 if reaper.set_action_options then reaper.set_action_options(1) end
 
@@ -218,7 +281,7 @@ local cfg = {
   sizeW        = loadNum('sizeW', 760),    -- window size, remembered (full view, floating only)
   sizeH        = loadNum('sizeH', 680),
   notesOpen    = loadBool('notesOpen', false),
-  showFiles    = loadBool('showFiles', false),
+  blind        = loadBool('blind', false),
   showAllWaves = loadBool('showAllWaves', false),
   ab           = loadBool('ab', true),
   folders      = loadBool('folders', true),
@@ -229,7 +292,7 @@ local function saveCfg()
   for _, k in ipairs({ 'textSize', 'buttonSize', 'tabSize', 'waveHeight', 'preroll', 'noteImgHeight', 'normMode', 'normTarget', 'sizeW', 'sizeH' }) do
     reaper.SetExtState(EXT, k, tostring(cfg[k]), true)
   end
-  for _, k in ipairs({ 'showFiles', 'showAllWaves', 'ab', 'folders', 'restoreOnClose', 'notesOpen' }) do
+  for _, k in ipairs({ 'blind', 'showAllWaves', 'ab', 'folders', 'restoreOnClose', 'notesOpen' }) do
     reaper.SetExtState(EXT, k, cfg[k] and '1' or '0', true)
   end
 end
@@ -262,6 +325,13 @@ local COL = {
   playhead     = 0xFFFFFFFF,
   takeMarker   = 0xFF6B6BFF,
   sharedMarker = 0x6BB8FFFF,
+  neutral      = 0x3A3F47FF,   -- blind: every stimulus button
+  neutralHov   = 0x474D57FF,
+  neutralAct   = 0x2E333AFF,
+  blind        = 0x6E56CFFF,   -- blind MODE only (toggle, banner); never on a stimulus
+  blindHov     = 0x8470E0FF,
+  blindAct     = 0x5A45B5FF,
+  blindBg      = 0x2A2250FF,
   loopShade    = 0xF0B42940,
   loopShadeOff = 0xF0B42918,
 }
@@ -491,25 +561,20 @@ local function scanItems(isPres, ws, we, wantHeaders, wantClips)
       local tr, ti, trackName, path = T.tr, T.ti, T.name, T.path
       local idxs = itemsIn(tr, ws, we)
 
-      -- REAPER 7 fixed item lanes: every lane's items become clips. If audio
-      -- here sits on more than one lane, group them under a node named after the track.
-      local lanePath = path
+      -- REAPER 7 fixed item lanes: if audio here sits on more than one lane, the
+      -- clips are drawn together as one lanes group (a thin row per lane).
+      local lanesKey, nLanes
       if T.laneMode and wantClips then
-        local used, nUsed = {}, 0
+        local used = {}
+        nLanes = 0
         for _, ii in ipairs(idxs) do
           local it = reaper.GetTrackMediaItem(tr, ii)
           if reaper.GetActiveTake(it) then
             local lane = reaper.GetMediaItemInfo_Value(it, 'I_FIXEDLANE')
-            if not used[lane] then used[lane], nUsed = true, nUsed + 1 end
+            if not used[lane] then used[lane], nLanes = true, nLanes + 1 end
           end
         end
-        if nUsed > 1 then
-          lanePath = {}
-          for _, f in ipairs(path) do lanePath[#lanePath + 1] = f end
-          lanePath[#lanePath + 1] = {
-            key = 'lanes' .. reaper.GetTrackGUID(tr), name = trackName, rgb = trackRGB(tr), isLanes = true, track = tr,
-          }
-        end
+        if nLanes > 1 then lanesKey = 'lanes' .. reaper.GetTrackGUID(tr) else nLanes = nil end
       end
 
       for _, ii in ipairs(idxs) do
@@ -542,7 +607,7 @@ local function scanItems(isPres, ws, we, wantHeaders, wantClips)
             local lane, laneLabel
             if T.laneMode then
               lane = math.floor(reaper.GetMediaItemInfo_Value(it, 'I_FIXEDLANE'))
-              if lanePath ~= path then
+              if lanesKey then
                 local _, lname = reaper.GetSetMediaTrackInfo_String(tr, 'P_LANENAME:' .. lane, '', false)
                 laneLabel = (lname and lname ~= '') and lname or ('lane ' .. (lane + 1))
               end
@@ -558,17 +623,8 @@ local function scanItems(isPres, ws, we, wantHeaders, wantClips)
               end
             end
 
-            -- Several takes: group them under a node named after the track
-            local takePath = lanePath
-            if #audio > 1 then
-              local _, iguid = reaper.GetSetMediaItemInfo_String(it, 'GUID', '', false)
-              takePath = {}
-              for _, f in ipairs(lanePath) do takePath[#takePath + 1] = f end
-              takePath[#takePath + 1] = {
-                key = 'takes' .. (iguid ~= '' and iguid or tostring(it)),
-                name = trackName, rgb = trackRGB(tr), isTakes = true, track = tr,
-              }
-            end
+            -- Several takes of one item are drawn as one row with a chip per take
+            local itemKey = tostring(it)
 
             local note = (#audio > 0) and itemNotes(it) or ''
             for n, a in ipairs(audio) do
@@ -585,7 +641,9 @@ local function scanItems(isPres, ws, we, wantHeaders, wantClips)
                 takeName = reaper.GetTakeName(a.tk),
                 markers = takeMarkers(a.tk, s, te),
                 itemNote = note,
-                path = takePath,
+                path = path,
+                itemKey = itemKey, takeIdx = n, nTakes = #audio,
+                lanesKey = lanesKey, nLanes = nLanes, laneLabel = laneLabel,
               }
             end
           end
@@ -1327,6 +1385,14 @@ local function coloredButton(label, w, h, style)
     ImGui.PushStyleColor(ctx, ImGui.Col_Button, COL.btnActive)
     ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, COL.btnActive)
     ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, COL.btnActive)
+  elseif style == 'neutral' then
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, COL.neutral)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, COL.neutralHov)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, COL.neutralAct)
+  elseif style == 'blind' then
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, COL.blind)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, COL.blindHov)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, COL.blindAct)
   elseif style == 'switch' then
     ImGui.PushStyleColor(ctx, ImGui.Col_Button, COL.switch)
     ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, COL.switchHov)
@@ -1512,7 +1578,7 @@ local function removeMarker(c, m)
   reaper.UpdateArrange()
   cache.state = -1
   if ok then
-    setStatus('Marker removed: ' .. m.name .. '  (Ctrl+Z to undo)', COL.liveNote)
+    setStatus('Marker removed' .. (UI.hiddenNow() and '' or (': ' .. m.name)) .. '  (Ctrl+Z to undo)', COL.liveNote)
   else
     setStatus('Could not remove the marker', 0xFF6B6BFF)
   end
@@ -1842,24 +1908,275 @@ local PB = {}   -- the presentation builder (see "presentation" below)
 local startMarker   -- defined in "add a marker" below
 local startNote     -- defined in "add a note" below
 
-local function drawClip(c, i, activeClip, shared)
-  local btnH = math.floor(cfg.buttonSize * 1.9)
+------------------------------------------------------- blind mode + labels --
+-- Blind mode hides every name (track, folder, take, lane, file), clip and folder colour, item note, take-marker name,
+-- clip length and waveform; shuffles the rows of each region with a seed kept in the project; and shows letters.
+-- Region tabs, the big text and the cue stay (the presenter wrote them for the audience).
+-- Everything that names a clip goes through UI.clipLabel() / clipName() so there is one place to get it right.
+local BL = { revealS = nil, ask = nil }   -- revealS: start of the one region whose names are showing; ask: pending confirm
+local blindMap = {}                       -- clip key -> { code = 'B', sub = 'take 2' } for the region on screen
+
+function UI.hiddenNow()
+  return cfg.blind and not (BL.revealS ~= nil and BL.revealS == cache.curS)
+end
+
+-- 'A'..'Z', 'AA', 'AB', ...
+function UI.letterCode(n)
+  local out = ''
+  while n > 0 do
+    local r = (n - 1) % 26
+    out = string.char(65 + r) .. out
+    n = (n - r - 1) // 26
+  end
+  return out
+end
+
+function UI.blindSeed()
+  local _, v = reaper.GetProjExtState(0, EXT_SEC, 'blindSeed')
+  local n = tonumber(v)
+  if not n then
+    math.randomseed(math.floor(reaper.time_precise() * 1000) % 2147483647)
+    n = math.random(1, 2147483646)
+    reaper.SetProjExtState(0, EXT_SEC, 'blindSeed', tostring(n))
+  end
+  return n
+end
+
+-- Fisher-Yates with a small deterministic generator, so the same project + region always gives the same order
+function UI.shuffled(list, regionStart)
+  local out = {}
+  for i, v in ipairs(list) do out[i] = v end
+  local st = (UI.blindSeed() + math.floor((regionStart or 0) * 1000 + 0.5) * 7919) % 2147483647
+  if st == 0 then st = 1 end
+  for i = #out, 2, -1 do
+    st = (st * 48271) % 2147483647
+    local j = (st % i) + 1
+    out[i], out[j] = out[j], out[i]
+  end
+  return out
+end
+
+-- The name shown for a clip: its track (and take / lane), or its letter in blind mode.
+-- short = leave out the take / lane part.
+function UI.clipLabel(c, short)
+  if UI.hiddenNow() then
+    local b = blindMap[c.key]
+    if not b then return 'hidden clip' end
+    if short or not b.sub then return b.code end
+    return b.code .. '  ' .. b.sub
+  end
+  if short then return c.trackName end
+  return c.trackName .. (c.takeLabel and ('  |  ' .. c.takeLabel) or '')
+end
+
+-- Marker names: numbers in blind mode (the text can name the vendor)
+function UI.shownMarkers(list)
+  if not UI.hiddenNow() then return list end
+  local out = {}
+  for k, m in ipairs(list) do
+    local copy = {}
+    for key, v in pairs(m) do copy[key] = v end
+    copy.name = tostring(k)
+    out[k] = copy
+  end
+  return out
+end
+
+-- Colour used for a clip's buttons: the clip's colour, nothing in blind mode
+function UI.clipStyle(c) if UI.hiddenNow() then return 'neutral' end return c.rgb end
+
+------------------------------------------------------------------- units --
+-- What one row of the list stands for: a plain clip, one item with several takes ('takes'), or one track with
+-- audio on several fixed lanes ('lanes'). Playback still works per clip; units only decide how rows are drawn
+-- and what a number key means.
+function UI.buildUnits(clips)
+  local units, byItem, byLanes = {}, {}, {}
+  for _, c in ipairs(clips) do
+    local u
+    if c.lanesKey then
+      u = byLanes[c.lanesKey]
+      if not u then u = { kind = 'lanes', clips = {}, key = c.lanesKey }; byLanes[c.lanesKey] = u; units[#units + 1] = u end
+    elseif (c.nTakes or 1) > 1 then
+      u = byItem[c.itemKey]
+      if not u then u = { kind = 'takes', clips = {}, key = c.itemKey }; byItem[c.itemKey] = u; units[#units + 1] = u end
+    else
+      u = { kind = 'plain', clips = {}, key = c.key }
+      units[#units + 1] = u
+    end
+    u.clips[#u.clips + 1] = c
+    u.ti, u.path = u.ti or c.ti, u.path or c.path
+  end
+  return units
+end
+
+function UI.unitClip(u, key)
+  for _, c in ipairs(u.clips) do if c.key == key then return c end end
+end
+
+-- The clip a number key / the header acts on: the playing one, else the last played, else the item's active take
+function UI.unitRep(u)
+  if #u.clips == 1 then return u.clips[1] end
+  if playing then local c = UI.unitClip(u, playing.clip.key); if c then return c end end
+  if activeKey then local c = UI.unitClip(u, activeKey); if c then return c end end
+  if u.kind == 'takes' then
+    local at = reaper.GetActiveTake(u.clips[1].item)
+    for _, c in ipairs(u.clips) do if c.take == at then return c end end
+  end
+  return u.clips[1]
+end
+
+-- Transport state of a clip: playing / switch (A/B armed) / paused / idle
+function UI.clipState(c)
   local isThis = playing and playing.clip.key == c.key
-  local isPaused = (not isThis) and (not cfg.ab) and resume[c.key] ~= nil
+  if isThis then return 'playing' end
+  if playing and cfg.ab then return 'switch' end
+  if ((not cfg.ab) and resume[c.key] ~= nil) or (cfg.ab and abOff) then return 'paused' end
+  return 'idle'
+end
+
+-- Click a take chip, or step with Up/Down. Takes of one item share a timeline, so the switch always keeps the point.
+function UI.switchWithin(u, c)
+  anchorRow(c)
+  if playing and UI.unitClip(u, playing.clip.key) then
+    if playing.clip.key == c.key then pauseClip() else switchTo(c) end
+  elseif playing then
+    toggleClip(c)
+  else
+    local from
+    if activeKey and UI.unitClip(u, activeKey) and activeKey ~= c.key then
+      local prev = activeKey
+      from = resume[prev] or abOff
+      resume[prev] = nil
+    end
+    if from then playClip(c, c.s + from) else toggleClip(c) end
+  end
+end
+
+function UI.stepUnit(u, dir)
+  if #u.clips < 2 then return end
+  local rep = UI.unitRep(u)
+  for k, c in ipairs(u.clips) do
+    if c.key == rep.key and u.clips[k + dir] then UI.switchWithin(u, u.clips[k + dir]) return end
+  end
+end
+
+function UI.unitSelected(u)
+  for _, c in ipairs(u.clips) do if not PB.isSelected(c) then return false end end
+  return true
+end
+function UI.setUnitSelected(u, on) for _, c in ipairs(u.clips) do PB.setSelected(c, on) end end
+
+-- Give every clip of the region its blind code (letters follow the shown order)
+function UI.assignBlind(units)
+  blindMap = {}
+  for n, u in ipairs(units) do
+    local code = UI.letterCode(n)
+    for k, c in ipairs(u.clips) do
+      local sub
+      if u.kind == 'takes' then sub = 'take ' .. k elseif u.kind == 'lanes' then sub = 'lane ' .. k end
+      blindMap[c.key] = { code = code, sub = sub, k = k }
+    end
+  end
+end
+
+-- Stacked-squares icon + "N takes" at the right end of a takes row's name button
+function UI.drawTakesBadge(n)
+  local x0, y0 = ImGui.GetItemRectMin(ctx)
+  local x1, y1 = ImGui.GetItemRectMax(ctx)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  ImGui.PushFont(ctx, font, 15)
+  local txt = n .. ' takes'
+  local tw, th = ImGui.CalcTextSize(ctx, txt)
+  local tx = x1 - tw - 14
+  ImGui.DrawList_AddText(dl, tx, (y0 + y1) / 2 - th / 2, 0xFFFFFFD0, txt)
+  ImGui.PopFont(ctx)
+  local ix, iy, sz = tx - 24, (y0 + y1) / 2 - 7, 11
+  ImGui.DrawList_AddRect(dl, ix + 4, iy, ix + 4 + sz, iy + sz, 0xFFFFFFB0, 2, 0, 1.5)
+  ImGui.DrawList_AddRectFilled(dl, ix, iy + 4, ix + sz, iy + 4 + sz, 0xFFFFFFD0, 2)
+end
+
+-- The takes of one item as chips (t1 t2 t3; 1 2 3 in blind mode). Light outline = the take REAPER has active.
+function UI.drawTakeChips(u, rep, i)
+  local hidden = UI.hiddenNow()
+  local inUnit = playing and UI.unitClip(u, playing.clip.key)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  ImGui.PushFont(ctx, font, 16)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 9, 4)
+  for k, tc in ipairs(u.clips) do
+    if k > 1 then ImGui.SameLine(ctx, 0, 4) end
+    local st = UI.clipState(tc)
+    local style
+    if st == 'playing' then style = 'play'
+    elseif inUnit then style = 'switch'                       -- a click switches at the same point
+    elseif st == 'switch' then style = 'switch'
+    elseif st == 'paused' and tc.key == rep.key then style = 'paused'
+    end
+    local label = hidden and tostring(k) or ('t' .. k)
+    if coloredButton(label .. '##take' .. i .. '_' .. k, 0, 0, style) then UI.switchWithin(u, tc) end
+    if ImGui.IsItemHovered(ctx) then
+      ImGui.SetTooltip(ctx, hidden and ('take ' .. k) or ('take %d  -  %s'):format(k, tc.takeName))
+    end
+    if tc.key == rep.key then
+      local x0, y0 = ImGui.GetItemRectMin(ctx)
+      local x1, y1 = ImGui.GetItemRectMax(ctx)
+      ImGui.DrawList_AddRect(dl, x0 - 2, y0 - 2, x1 + 2, y1 + 2, COL.noteText, 5, 0, 2)
+    end
+  end
+  ImGui.PopStyleVar(ctx)
+  ImGui.PopFont(ctx)
+end
+
+-- The notes line and (optionally) the marker row under a clip / takes row / lanes group
+function UI.drawNoteAndMarkers(c, i, withMarkerRow)
+  local hidden = UI.hiddenNow()
+  local entries = {}
+  if not hidden then
+    local clipImage = itemImage(c.item)       -- cached; only clips on screen are looked up
+    if (c.itemNote or ''):match('%S') or clipImage then
+      entries[1] = { text = c.itemNote, image = clipImage, item = c.item }
+    end
+    for _, en in ipairs(clipNotes[c.key] or {}) do entries[#entries + 1] = en end
+  end
+  ImGui.PushFont(ctx, font, 15)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 8, 3)
+  ImGui.PushStyleColor(ctx, ImGui.Col_Text, COL.accent)
+  if coloredButton('+ Note  [N]##addnote' .. i, 0, 0) then startNote(c) end
+  if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Add a note to this clip (N)') end
+  ImGui.PopStyleColor(ctx)
+  ImGui.PopStyleVar(ctx)
+  ImGui.PopFont(ctx)
+  if #entries > 0 then ImGui.SameLine(ctx) end
+  drawNotes(c.key, entries)
+
+  -- Take markers: "+ Marker" first, then a jump button per marker (numbers in blind mode; no remove there)
+  if withMarkerRow or #c.markers > 0 then
+    drawMarkerButtons(UI.shownMarkers(c.markers), 'tm' .. i .. '_', COL.takeMarker,
+      function(m) jumpToMarker(c, m.off) end,
+      function() startMarker(c) end,
+      (not hidden) and function(m) removeMarker(c, m) end or nil)
+  end
+end
+
+function UI.unitHasKey(u, key) return u and key and UI.unitClip(u, key) ~= nil end
+
+-- One row: tick, restart, state, name (number + name), time. Plain clip: the seek bar / waveform under it.
+-- Takes (u given): the name button says "N takes", the chips go in front of the one seek bar.
+local function drawClip(c, i, activeClip, shared, u)
+  local btnH = math.floor(cfg.buttonSize * 1.9)
+  local hidden = UI.hiddenNow()
+  local isTakes = u ~= nil
+  local state = UI.clipState(c)
+  local isThis = state == 'playing'
+  local isActiveUnit = activeClip and (activeClip.key == c.key or UI.unitHasKey(u, activeClip.key))
 
   -- State of this clip, shown by colour + symbol (the text never changes):
   --   playing  green,  pause symbol   (click pauses)
   --   paused   amber,  play symbol    (click resumes from the time shown)
   --   switch   blue,   swap symbol    (A/B: click switches to it at the same point)
   --   idle     grey,   play symbol
-  local state
-  if isThis then state = 'playing'
-  elseif playing and cfg.ab then state = 'switch'
-  elseif isPaused or (cfg.ab and abOff) then state = 'paused'
-  else state = 'idle' end
-  -- Name button: green playing, blue A/B, otherwise the clip's own colour.
+  -- Name button: green playing, blue A/B, otherwise the clip's own colour (grey in blind mode).
   -- State box: same, except amber when paused (so paused still shows).
-  local style = ({ playing = 'play', switch = 'switch' })[state] or c.rgb
+  local style = ({ playing = 'play', switch = 'switch' })[state] or UI.clipStyle(c)
   local stateStyle = (state == 'paused') and 'paused' or style
   local icon  = ({ playing = 'pause', paused = 'play', switch = 'switch', idle = 'play' })[state]
 
@@ -1868,37 +2185,37 @@ local function drawClip(c, i, activeClip, shared)
 
   -- If this row was clicked last frame and has since moved on screen (because
   -- something above it changed height), scroll so it's back where it was
-  if scrollAnchor and scrollAnchor.key == c.key then
+  if scrollAnchor and (scrollAnchor.key == c.key or UI.unitHasKey(u, scrollAnchor.key)) then
     local dy = rowY - scrollAnchor.y
     if math.abs(dy) > 1 then scrollBodyBy(dy) end
     scrollAnchor = nil
   end
-  rowYs[c.key] = rowY
-  rowSeen[c.key] = frameNo
+  for _, uc in ipairs(u and u.clips or { c }) do rowYs[uc.key] = rowY; rowSeen[uc.key] = frameNo end
 
-  -- Tick box (both views): select for recolouring / adding / removing
-  if PB.selectBox('sel' .. i, PB.isSelected(c), btnH) then PB.setSelected(c, not PB.isSelected(c)) end
+  -- Tick box (both views): select for recolouring / adding / removing (a takes row selects all its takes)
+  local sel = u and UI.unitSelected(u) or PB.isSelected(c)
+  if PB.selectBox('sel' .. i, sel, btnH) then
+    if u then UI.setUnitSelected(u, not sel) else PB.setSelected(c, not sel) end
+  end
   ImGui.SameLine(ctx)
   if iconButton('restart' .. i, 'restart', btnH, nil, COL.iconDim) then anchorRow(c); restartClip(c) end
   ImGui.SameLine(ctx)
   if iconButton('state' .. i, icon, btnH, stateStyle) then anchorRow(c); toggleClip(c) end
   ImGui.SameLine(ctx)
 
-  -- Time box: fixed width, shows where the clip is (or will play from)
+  -- Time box: fixed width, shows where the clip is (or will play from). Blind: elapsed only.
   local timeSize = math.max(13, math.floor(cfg.buttonSize * 0.6))
   ImGui.PushFont(ctx, font, timeSize)
-  local timeW = ImGui.CalcTextSize(ctx, '00:00.0 / 00:00.0') + 24
+  local timeW = ImGui.CalcTextSize(ctx, hidden and '00:00.0' or '00:00.0 / 00:00.0') + 24
   ImGui.PopFont(ctx)
 
-  -- Name: number, track, lane/take. Fixed text, left-aligned.
-  local name = (i <= 9 and (i .. '     ') or '') .. c.trackName
-  if c.takeLabel then name = name .. '  |  ' .. c.takeLabel end
-  if cfg.showFiles then name = name .. '   (' .. c.takeName .. ')' end
+  -- Name: number, track. Fixed text, left-aligned.
+  local name = (i <= 9 and (i .. '     ') or '') .. UI.clipLabel(c, true)
   -- Presentation: room for the remove x at the end of the row
   local xW = c.inPres and math.floor(btnH * 0.75) or 0
   local editW = math.floor(btnH * 0.75)       -- room for the rename pencil
   local nameW = math.max(80, ImGui.GetContentRegionAvail(ctx) - timeW - 10 - (editW + 10) - (xW > 0 and xW + 10 or 0))
-  local editing = PB.inlineRename and PB.inlineRename.key == c.key
+  local editing = (not hidden) and PB.inlineRename and PB.inlineRename.key == c.key
   ImGui.PushFont(ctx, font, cfg.buttonSize)
   if editing then
     -- Track name edited in place. Enter or clicking away saves, Esc cancels.
@@ -1920,9 +2237,10 @@ local function drawClip(c, i, activeClip, shared)
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0, 0.5)
     if coloredButton(name .. '##clip' .. i, nameW, btnH, style) then anchorRow(c); toggleClip(c) end
     ImGui.PopStyleVar(ctx)
+    if isTakes then UI.drawTakesBadge(#u.clips) end
   end
   ImGui.PopFont(ctx)
-  PB.clipMenu(c, i)
+  if not hidden then PB.clipMenu(c, i) end
   ImGui.SameLine(ctx)
 
   local len = c.e - c.s
@@ -1933,16 +2251,16 @@ local function drawClip(c, i, activeClip, shared)
   ImGui.DrawList_AddRectFilled(dl, tx, ty, tx + timeW, ty + btnH, COL.seekBg, 6)
   local tcol = (state == 'playing' and COL.waveOn) or (state == 'paused' and COL.accent) or COL.dim
   ImGui.PushFont(ctx, font, timeSize)
-  local txt = fmtTime(cur) .. ' / ' .. fmtTime(len)
+  local txt = hidden and fmtTime(cur) or (fmtTime(cur) .. ' / ' .. fmtTime(len))
   local tw, th = ImGui.CalcTextSize(ctx, txt)
   ImGui.DrawList_AddText(dl, tx + (timeW - tw) / 2, ty + (btnH - th) / 2, tcol, txt)
   ImGui.PopFont(ctx)
 
   -- Rename pencil: shown while the mouse is over the row (space is kept so
-  -- nothing shifts). Renames the track, i.e. the clip's button label.
+  -- nothing shifts). Renames the track, i.e. the clip's button label. Not in blind mode.
   ImGui.SameLine(ctx, 0, 10)
   local rowRight = tx + timeW + editW + 12 + (xW > 0 and xW + 10 or 0)
-  if not editing and ImGui.IsMouseHoveringRect(ctx, rowX, rowY, rowRight, rowY + btnH) then
+  if not editing and not hidden and ImGui.IsMouseHoveringRect(ctx, rowX, rowY, rowRight, rowY + btnH) then
     if iconButton('rename' .. i, 'edit', editW, nil, COL.iconDim) then
       PB.inlineRename = { key = c.key, text = c.trackName, focus = true }
     end
@@ -1956,7 +2274,7 @@ local function drawClip(c, i, activeClip, shared)
   if xW > 0 then
     ImGui.SameLine(ctx, 0, 10)
     if ImGui.IsMouseHoveringRect(ctx, rowX, rowY, rowRight, rowY + btnH) then
-      if coloredButton('x##rmclip' .. i, xW, btnH) then PB.removeClips({ c }) end
+      if coloredButton('x##rmclip' .. i, xW, btnH) then PB.removeClips(u and u.clips or { c }) end
       if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Remove from the presentation (Ctrl+Z to undo)') end
     else
       ImGui.Dummy(ctx, xW, btnH)
@@ -1964,44 +2282,205 @@ local function drawClip(c, i, activeClip, shared)
   end
 
   -- Selected clip (playing, or the one Space will resume): gold outline
-  if activeClip and activeClip.key == c.key then
+  if isActiveUnit then
     ImGui.DrawList_AddRect(dl, rowX - 4, rowY - 4, tx + timeW + 4, ty + btnH + 4, COL.accent, 8, 0, 2)
   end
 
   local by0 = ImGui.GetCursorPosY(ctx)
-  if cfg.showAllWaves or (activeClip and activeClip.key == c.key) then
+  local showWave = (not hidden) and (cfg.showAllWaves or isActiveUnit)
+  if isTakes then UI.drawTakeChips(u, c, i) end
+  if showWave then
     drawWaveform(c, i, isThis, shared)
     blockH.wave = ImGui.GetCursorPosY(ctx) - by0
   else
+    if isTakes then ImGui.SameLine(ctx, 0, 10) end
     drawSeekBar(c, i, isThis)
     blockH.seek = ImGui.GetCursorPosY(ctx) - by0
   end
 
-  -- Notes: the clip's own item notes/image, then text items on its track
-  local entries = {}
-  local clipImage = itemImage(c.item)       -- cached; only clips on screen are looked up
-  if (c.itemNote or ''):match('%S') or clipImage then
-    entries[1] = { text = c.itemNote, image = clipImage, item = c.item }
+  UI.drawNoteAndMarkers(c, i, true)
+  ImGui.Spacing(ctx)
+end
+
+-- A track with audio on several fixed lanes: a slim header, then a thin row per lane on a lane strip.
+function UI.drawLanes(u, i, activeClip, shared)
+  local hidden = UI.hiddenNow()
+  local rep = UI.unitRep(u)
+  local hdrH = math.floor(cfg.buttonSize * 1.2)
+  local laneH = math.floor(cfg.buttonSize * 1.15)
+  local isActiveUnit = activeClip and UI.unitClip(u, activeClip.key) ~= nil
+  local inUnit = playing and UI.unitClip(u, playing.clip.key)
+  local trackRgb = u.clips[1].rgb
+  local edge = (hidden or not trackRgb) and 0x5A626EFF or rgba(trackRgb)
+  local rowX, rowY = ImGui.GetCursorScreenPos(ctx)
+
+  if scrollAnchor and UI.unitHasKey(u, scrollAnchor.key) then
+    local dy = rowY - scrollAnchor.y
+    if math.abs(dy) > 1 then scrollBodyBy(dy) end
+    scrollAnchor = nil
   end
-  for _, en in ipairs(clipNotes[c.key] or {}) do entries[#entries + 1] = en end
-  -- Notes line: "+ Note" first, then the collapsible note (if any)
-  ImGui.PushFont(ctx, font, 15)
-  ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 8, 3)
-  ImGui.PushStyleColor(ctx, ImGui.Col_Text, COL.accent)
-  if coloredButton('+ Note  [N]##addnote' .. i, 0, 0) then startNote(c) end
-  if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Add a note to this clip (N)') end
-  ImGui.PopStyleColor(ctx)
+  for _, uc in ipairs(u.clips) do rowYs[uc.key] = rowY; rowSeen[uc.key] = frameNo end
+
+  -- Header: tick and restart act on the playing / selected lane
+  local sel = UI.unitSelected(u)
+  if PB.selectBox('sel' .. i, sel, hdrH) then UI.setUnitSelected(u, not sel) end
+  ImGui.SameLine(ctx)
+  if iconButton('restart' .. i, 'restart', hdrH, nil, COL.iconDim) then anchorRow(rep); restartClip(rep) end
+  ImGui.SameLine(ctx)
+  local hx0, hy0 = ImGui.GetCursorScreenPos(ctx)
+  local nameW = math.max(120, ImGui.GetContentRegionAvail(ctx) - 20)
+  ImGui.PushFont(ctx, font, cfg.tabSize)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0, 0.5)
+  ImGui.PushStyleColor(ctx, ImGui.Col_Button, COL.seekBg)
+  ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, COL.seekBgHov)
+  ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, COL.seekBgHov)
+  local title = ('        %s%s    %d lanes'):format(i <= 9 and (i .. '   ') or '', UI.clipLabel(rep, true), #u.clips)
+  if ImGui.Button(ctx, title .. '##lanehdr' .. i, nameW, hdrH) then anchorRow(rep); toggleClip(rep) end
+  ImGui.PopStyleColor(ctx, 3)
   ImGui.PopStyleVar(ctx)
   ImGui.PopFont(ctx)
-  if #entries > 0 then ImGui.SameLine(ctx) end
-  drawNotes(c.key, entries)
+  local dl = ImGui.GetWindowDrawList(ctx)
+  do   -- track-colour edge, and the lane-bars icon
+    local x0, y0 = ImGui.GetItemRectMin(ctx)
+    local x1, y1 = ImGui.GetItemRectMax(ctx)
+    ImGui.DrawList_AddRectFilled(dl, x0, y0, x0 + 4, y1, edge, 2)
+    for k = 0, 2 do ImGui.DrawList_AddRectFilled(dl, x0 + 12, y0 + (y1 - y0) / 2 - 6 + k * 5, x0 + 26, y0 + (y1 - y0) / 2 - 4 + k * 5, COL.dim, 1) end
+    ImGui.PushFont(ctx, font, 14)
+    local hint = 'one lane plays at a time'
+    local tw, th = ImGui.CalcTextSize(ctx, hint)
+    ImGui.DrawList_AddText(dl, x1 - tw - 12, (y0 + y1) / 2 - th / 2, COL.dim, hint)
+    ImGui.PopFont(ctx)
+  end
+  if ImGui.IsItemHovered(ctx) then
+    ImGui.SetTooltip(ctx, 'One lane plays at a time. Click to play the last lane; Up/Down steps through the lanes.')
+  end
 
-  -- Take markers: "+ Marker" first, then a jump button per marker
-  drawMarkerButtons(c.markers, 'tm' .. i .. '_', COL.takeMarker,
-    function(m) jumpToMarker(c, m.off) end,
-    function() startMarker(c) end,
-    function(m) removeMarker(c, m) end)
+  -- Thin rows, one per lane
+  local indent = math.floor(hdrH * 0.9)
+  local stripX = rowX + math.floor(hdrH * 0.45)
+  local rows = {}
+  ImGui.PushFont(ctx, font, math.max(13, math.floor(cfg.buttonSize * 0.62)))
+  for j, lc in ipairs(u.clips) do
+    local st = UI.clipState(lc)
+    local isThis = st == 'playing'
+    local nstyle = ({ playing = 'play', switch = 'switch' })[st]
+    if not nstyle and st == 'paused' and lc.key == rep.key then nstyle = 'paused' end
+    nstyle = nstyle or UI.clipStyle(lc)
+    ImGui.Indent(ctx, indent)
+    local icon = ({ playing = 'pause', paused = 'play', switch = 'switch', idle = 'play' })[st]
+    if iconButton('lstate' .. i .. '_' .. j, icon, laneH, (st == 'paused' and 'paused') or nstyle) then anchorRow(lc); toggleClip(lc) end
+    local _, ry = ImGui.GetItemRectMin(ctx)
+    rows[#rows + 1] = { y = ry + laneH / 2, playing = isThis }
+    ImGui.SameLine(ctx, 0, 6)
+    local label
+    if hidden then label = (blindMap[lc.key] and blindMap[lc.key].sub) or ('lane ' .. j)
+    else label = ('L%d  %s'):format(j, lc.laneLabel or lc.takeLabel or ('lane ' .. j)) end
+    local tW = ImGui.CalcTextSize(ctx, hidden and '00:00.0' or '00:00.0 / 00:00.0') + 20
+    local w = math.max(60, ImGui.GetContentRegionAvail(ctx) - tW - 12)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0, 0.5)
+    if coloredButton(label .. '##lane' .. i .. '_' .. j, w, laneH, nstyle) then anchorRow(lc); toggleClip(lc) end
+    ImGui.PopStyleVar(ctx)
+    local bx0 = ImGui.GetItemRectMin(ctx)
+    local bx1, by1 = ImGui.GetItemRectMax(ctx)
+    local len = lc.e - lc.s
+    local cur = clamp(displayOffset(lc, isThis), 0, len)
+    local frac = len > 0 and (cur / len) or 0
+    ImGui.DrawList_AddRectFilled(dl, bx0, by1 - 3, bx0 + (bx1 - bx0) * frac, by1, isThis and 0xBFF0D0FF or COL.accent, 0)
+    ImGui.SameLine(ctx, 0, 6)
+    local tx, ty = ImGui.GetCursorScreenPos(ctx)
+    ImGui.Dummy(ctx, tW, laneH)
+    ImGui.DrawList_AddRectFilled(dl, tx, ty, tx + tW, ty + laneH, COL.seekBg, 5)
+    local txt = hidden and fmtTime(cur) or (fmtTime(cur) .. ' / ' .. fmtTime(len))
+    local tw, th = ImGui.CalcTextSize(ctx, txt)
+    ImGui.DrawList_AddText(dl, tx + (tW - tw) / 2, ty + (laneH - th) / 2, isThis and COL.waveOn or COL.dim, txt)
+    ImGui.Unindent(ctx, indent)
+  end
+  ImGui.PopFont(ctx)
+
+  -- The lane strip: a vertical bar in the track colour, a branch to each lane; the playing lane's branch is green
+  if #rows > 0 then
+    local top = hy0 + hdrH
+    ImGui.DrawList_AddRectFilled(dl, stripX, top, stripX + 4, rows[#rows].y + 1, edge, 0)
+    for _, r in ipairs(rows) do
+      ImGui.DrawList_AddRectFilled(dl, stripX, r.y - 1.5, stripX + indent + 2, r.y + 1.5, r.playing and COL.play or edge, 0)
+    end
+  end
+
+  -- Selected group: gold outline around the header
+  if isActiveUnit then
+    ImGui.DrawList_AddRect(dl, rowX - 4, rowY - 4, hx0 + nameW + 4, hy0 + hdrH + 4, COL.accent, 8, 0, 2)
+  end
+
+  -- One seek bar (or the waveform, for the selected group) for the shown lane
+  local by0 = ImGui.GetCursorPosY(ctx)
+  local repThis = playing and playing.clip.key == rep.key
+  if (not hidden) and (cfg.showAllWaves or isActiveUnit) then
+    drawWaveform(rep, i, repThis, shared)
+    blockH.wave = ImGui.GetCursorPosY(ctx) - by0
+  else
+    drawSeekBar(rep, i, repThis)
+    blockH.seek = ImGui.GetCursorPosY(ctx) - by0
+  end
+  UI.drawNoteAndMarkers(rep, i, false)
   ImGui.Spacing(ctx)
+end
+
+-- The violet banner under the toolbar while Blind mode is on
+function UI.drawBlindBanner(s)
+  local revealed = BL.revealS ~= nil and BL.revealS == s
+  local x0, y0 = ImGui.GetCursorScreenPos(ctx)
+  local availW = ImGui.GetContentRegionAvail(ctx)
+  local label = revealed and 'Hide again' or 'Reveal this region...'
+  ImGui.PushFont(ctx, font, 15)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 10, 4)
+  local btnW = ImGui.CalcTextSize(ctx, label) + 20
+  local txt = revealed and 'Blind: names are showing for this region. Leaving it hides them again.'
+    or "Blind: names, colours, notes, lengths and waveforms are hidden, and the order is shuffled. Cover REAPER's arrange view before sharing your screen."
+  local cx = ImGui.GetCursorPosX(ctx)
+  ImGui.PushTextWrapPos(ctx, cx + availW - btnW - 24)
+  ImGui.TextColored(ctx, COL.noteText, txt)
+  ImGui.PopTextWrapPos(ctx)
+  ImGui.SameLine(ctx, cx + availW - btnW - 10)
+  ImGui.BeginDisabled(ctx, (not revealed) and s == nil)
+  if coloredButton(label .. '##blindreveal', btnW, 0) then
+    if revealed then BL.revealS = nil else BL.ask = 'reveal' end
+  end
+  ImGui.EndDisabled(ctx)
+  ImGui.PopStyleVar(ctx)
+  ImGui.PopFont(ctx)
+  local _, y1 = ImGui.GetCursorScreenPos(ctx)
+  ImGui.DrawList_AddRect(ImGui.GetWindowDrawList(ctx), x0 - 6, y0 - 4, x0 + availW + 6, y1, COL.blind, 6, 0, 1.5)
+  ImGui.Spacing(ctx)
+end
+
+-- "Reveal this region" / "Turn Blind mode off": always asks first
+function UI.drawBlindPopup(s)
+  if BL.ask and not BL.opened then ImGui.OpenPopup(ctx, 'Blind mode##presenter'); BL.opened = true end
+  if not BL.opened then return end
+  if ImGui.BeginPopupModal(ctx, 'Blind mode##presenter', nil, ImGui.WindowFlags_AlwaysAutoResize) then
+    local off = BL.ask == 'off'
+    ImGui.Text(ctx, off and 'Turn Blind mode off?' or 'Reveal this region?')
+    ImGui.TextColored(ctx, COL.dim, off and 'Every name, colour, note and length shows again.'
+      or 'Names, colours, notes and lengths show here until you leave this region.')
+    ImGui.Spacing(ctx)
+    local done = false
+    if coloredButton((off and 'Turn off' or 'Reveal') .. '##blindok', 0, 0, 'blind') then
+      if off then cfg.blind, BL.revealS = false, nil; saveCfg() else BL.revealS = s end
+      done = true
+    end
+    ImGui.SameLine(ctx, 0, 8)
+    if coloredButton('Keep hidden##blindno', 0, 0) or ImGui.IsKeyPressed(ctx, ImGui.Key_Escape, false) then done = true end
+    if done then BL.ask, BL.opened = nil, false; ImGui.CloseCurrentPopup(ctx) end
+    ImGui.EndPopup(ctx)
+  else
+    BL.ask, BL.opened = nil, false     -- closed some other way
+  end
+end
+
+function UI.drawUnit(u, i, activeClip, shared)
+  if u.kind == 'lanes' then UI.drawLanes(u, i, activeClip, shared)
+  elseif u.kind == 'takes' then drawClip(UI.unitRep(u), i, activeClip, shared, u)
+  else drawClip(u.clips[1], i, activeClip, shared, nil) end
 end
 
 -- A note row for a track that has text but no clip in this trial
@@ -2014,10 +2493,10 @@ end
 -------------------------------------------------------------- folder tree --
 -- Clips and note rows in track order (note rows go after any clips on
 -- earlier tracks, so they appear where their track is in REAPER)
-local function mergeRows(clips, noteRows)
+local function mergeRows(units, noteRows)
   local rows = {}
-  for i, c in ipairs(clips) do rows[#rows + 1] = { clip = c, i = i, ti = c.ti, ord = i } end
-  for j, n in ipairs(noteRows) do rows[#rows + 1] = { note = n, ti = n.ti, ord = #clips + j } end
+  for i, u in ipairs(units) do rows[#rows + 1] = { unit = u, i = i, ti = u.ti, ord = i } end
+  for j, n in ipairs(noteRows) do rows[#rows + 1] = { note = n, ti = n.ti, ord = #units + j } end
   table.sort(rows, function(a, b)
     if a.ti ~= b.ti then return a.ti < b.ti end
     return a.ord < b.ord
@@ -2030,7 +2509,7 @@ end
 local function buildTree(rows)
   local root = { entries = {}, byKey = {} }
   for _, row in ipairs(rows) do
-    local c = row.clip or row.note
+    local c = row.unit or row.note
     local i = row.i
     local node = root
     for _, f in ipairs(c.path or {}) do
@@ -2042,8 +2521,8 @@ local function buildTree(rows)
       end
       node = child
     end
-    if row.clip then
-      node.entries[#node.entries + 1] = { clip = c, i = i }
+    if row.unit then
+      node.entries[#node.entries + 1] = { unit = c, i = i }
     else
       node.entries[#node.entries + 1] = { note = c }
     end
@@ -2054,9 +2533,9 @@ end
 local function subtreeInfo(node)
   local count, live = 0, false
   for _, ent in ipairs(node.entries) do
-    if ent.clip then
+    if ent.unit then
       count = count + 1
-      if playing and playing.clip.key == ent.clip.key then live = true end
+      if playing and UI.unitClip(ent.unit, playing.clip.key) then live = true end
     elseif ent.node then
       local n, l = subtreeInfo(ent.node)
       count, live = count + n, live or l
@@ -2090,10 +2569,7 @@ local function drawFolder(n, activeClip, shared)
   -- ReaImGui's TreeNodeEx is (ctx, id, label, flags). The id is fixed per
   -- folder so the open/closed state survives the label changing (count,
   -- [playing]) and carries across tabs.
-  local unit
-  if f.isTakes then unit = count == 1 and 'take' or 'takes'
-  elseif f.isLanes then unit = count == 1 and 'clip on lanes' or 'clips on lanes'
-  else unit = count == 1 and 'clip' or 'clips' end
+  local unit = count == 1 and 'clip' or 'clips'
   local label = ('%s    (%d %s)'):format(f.name, count, unit)
   local open = ImGui.TreeNodeEx(ctx, 'fld' .. f.key, label, TREE_FLAGS)
 
@@ -2124,8 +2600,8 @@ end
 
 drawNode = function(node, activeClip, shared)
   for _, ent in ipairs(node.entries) do
-    if ent.clip then
-      drawClip(ent.clip, ent.i, activeClip, shared)
+    if ent.unit then
+      UI.drawUnit(ent.unit, ent.i, activeClip, shared)
     elseif ent.note then
       drawNoteRow(ent.note)
     else
@@ -2136,8 +2612,8 @@ end
 
 -- On/off toggle with a fixed label and an indicator light, so it never
 -- changes width: green with a lit light when on, grey with a dark light when off
-local function topToggle(label, on)
-  local pressed = coloredButton('      ' .. label .. '##tog' .. label, 0, 0, on and 'play' or nil)
+local function topToggle(label, on, onStyle)
+  local pressed = coloredButton('      ' .. label .. '##tog' .. label, 0, 0, on and (onStyle or 'play') or nil)
   local x0, y0 = ImGui.GetItemRectMin(ctx)
   local _, y1 = ImGui.GetItemRectMax(ctx)
   local r = (y1 - y0) * 0.17
@@ -2198,38 +2674,68 @@ end
 -- One wrapping row of small clip buttons: same colours as the full rows
 -- (green playing, amber paused, blue A/B switch), gold outline on the
 -- selected clip, then the selected clip's time
-local function drawClipChips(clips, activeClip)
-  if #clips == 0 then
+local function drawClipChips(units, activeClip)
+  if #units == 0 then
     ImGui.TextColored(ctx, COL.dim, 'No clips in this region.')
     return
   end
-  local padX, spacing = 12, 6
+  local padX, spacing, segPad = 12, 6, 7
   ImGui.PushFont(ctx, font, cfg.tabSize)
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, padX, 6)
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_ItemSpacing, spacing, spacing)
   local avail = ImGui.GetContentRegionAvail(ctx)
   local lineW = 0
   local dl = ImGui.GetWindowDrawList(ctx)
-  for i, c in ipairs(clips) do
-    local label = (i <= 9 and (i .. '   ') or '') .. c.trackName
-    if c.takeLabel then label = label .. '  |  ' .. c.takeLabel end
-    local w = ImGui.CalcTextSize(ctx, label) + padX * 2
+  local hidden = UI.hiddenNow()
+  for i, u in ipairs(units) do
+    local rep = UI.unitRep(u)
+    local label = (i <= 9 and (i .. '   ') or '') .. UI.clipLabel(rep, true)
+    local nseg = (u.kind ~= 'plain') and #u.clips or 0
+    local segLabels, segW = {}, 0
+    for k = 1, nseg do
+      segLabels[k] = (u.kind == 'lanes') and ('L' .. k) or (hidden and tostring(k) or ('t' .. k))
+      segW = segW + ImGui.CalcTextSize(ctx, segLabels[k]) + segPad * 2
+    end
+    local w = ImGui.CalcTextSize(ctx, label) + padX * 2 + segW
     if i > 1 and lineW + spacing + w <= avail then
       ImGui.SameLine(ctx)
       lineW = lineW + spacing + w
     else
       lineW = w
     end
-    local isThis = playing and playing.clip.key == c.key
+    local inUnit = playing and UI.unitClip(u, playing.clip.key)
+    local isActive = activeClip and UI.unitClip(u, activeClip.key) ~= nil
+    local st = UI.clipState(rep)
     local style
-    if isThis then style = 'play'
-    elseif playing and cfg.ab then style = 'switch'
-    else style = c.rgb end
-    if coloredButton(label .. '##chip' .. i, 0, 0, style) then toggleClip(c) end
-    if activeClip and activeClip.key == c.key then
-      local x0, y0 = ImGui.GetItemRectMin(ctx)
-      local x1, y1 = ImGui.GetItemRectMax(ctx)
-      ImGui.DrawList_AddRect(dl, x0 - 3, y0 - 3, x1 + 3, y1 + 3, COL.accent, 7, 0, 2)
+    if inUnit then style = 'play'
+    elseif st == 'switch' then style = 'switch'
+    elseif st == 'paused' and isActive then style = 'paused'      -- paused shows amber here too
+    else style = UI.clipStyle(rep) end
+    if coloredButton(label .. '##chip' .. i, 0, 0, style) then toggleClip(rep) end
+    local ox0, oy0 = ImGui.GetItemRectMin(ctx)
+    local ox1, oy1 = ImGui.GetItemRectMax(ctx)
+    if nseg > 0 then
+      ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, 0)
+      ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, segPad, 6)
+      for k, sc in ipairs(u.clips) do
+        ImGui.SameLine(ctx, 0, 1)
+        local sst = UI.clipState(sc)
+        local sstyle
+        if sst == 'playing' then sstyle = 'play'
+        elseif inUnit or sst == 'switch' then sstyle = 'switch'
+        elseif sst == 'paused' and sc.key == rep.key then sstyle = 'paused' end
+        if coloredButton(segLabels[k] .. '##seg' .. i .. '_' .. k, 0, 0, sstyle) then
+          if u.kind == 'takes' then UI.switchWithin(u, sc) else anchorRow(sc); toggleClip(sc) end
+        end
+        local x0, y0 = ImGui.GetItemRectMin(ctx)
+        local x1, y1 = ImGui.GetItemRectMax(ctx)
+        ox1, oy1 = x1, math.max(oy1, y1)
+        if sc.key == rep.key then ImGui.DrawList_AddRectFilled(dl, x0, y1 - 3, x1, y1, COL.noteText, 0) end
+      end
+      ImGui.PopStyleVar(ctx, 2)
+    end
+    if isActive then
+      ImGui.DrawList_AddRect(dl, ox0 - 3, oy0 - 3, ox1 + 3, oy1 + 3, COL.accent, 7, 0, 2)
     end
   end
   ImGui.PopStyleVar(ctx, 2)
@@ -2239,7 +2745,7 @@ local function drawClipChips(clips, activeClip)
     local len = activeClip.e - activeClip.s
     local isThis = playing and playing.clip.key == activeClip.key
     local cur = clamp(displayOffset(activeClip, isThis), 0, len)
-    ImGui.TextColored(ctx, isThis and COL.waveOn or COL.dim, fmtTime(cur) .. ' / ' .. fmtTime(len))
+    ImGui.TextColored(ctx, isThis and COL.waveOn or COL.dim, hidden and fmtTime(cur) or (fmtTime(cur) .. ' / ' .. fmtTime(len)))
   end
 end
 
@@ -2301,7 +2807,7 @@ local function drawMarkerPopup()
     return
   end
 
-  local who = d.clip.trackName .. (d.clip.takeLabel and ('  |  ' .. d.clip.takeLabel) or '')
+  local who = UI.clipLabel(d.clip)
   ImGui.TextColored(ctx, COL.liveNote, 'Marker on ' .. who .. '  at  ' .. fmtTime(d.off))
 
   -- This clip's existing markers, for context
@@ -2404,7 +2910,7 @@ local function drawNotePopup()
     return
   end
 
-  local who = d.clip.trackName .. (d.clip.takeLabel and ('  |  ' .. d.clip.takeLabel) or '')
+  local who = UI.clipLabel(d.clip)
   ImGui.TextColored(ctx, COL.accent, 'Note on ' .. who)
 
   -- Existing notes: shown as text, or editable after "Edit existing notes"
@@ -2695,7 +3201,7 @@ end
 function PB.folderMenu(f)
   if not f.track then return end
   if not ImGui.BeginPopupContextItem(ctx, 'fldmenu' .. f.key) then return end
-  local word = (f.isTakes or f.isLanes) and 'track' or 'folder'
+  local word = 'folder'
   if ImGui.MenuItem(ctx, 'Rename ' .. word .. '...') then
     PB.startRename('track', f.track, f.name, word == 'folder' and 'Folder' or 'Track')
   end
@@ -2710,7 +3216,7 @@ end
 -- Right-click menu on a clip
 function PB.clipMenu(c, i)
   if not ImGui.BeginPopupContextItem(ctx, 'clipmenu' .. i) then return end
-  ImGui.TextColored(ctx, COL.dim, c.trackName .. (c.takeLabel and ('  |  ' .. c.takeLabel) or ''))
+  ImGui.TextColored(ctx, COL.dim, UI.clipLabel(c))
   ImGui.Separator(ctx)
   ImGui.Text(ctx, 'Colour')
   if PB.drawPalette('cm' .. i, function(rgb) PB.applyColour({ c }, rgb) end) then
@@ -2860,6 +3366,8 @@ function PB.trackForClip(rootIdx, c, s, e, keepFolders)
   local parent = reaper.GetTrack(0, rootIdx)
   local label = c.takeLabel and ('  |  ' .. c.takeLabel) or ''
   local name = c.trackName .. label
+  local blindCopy = UI.hiddenNow() and blindMap[c.key]
+  if blindCopy then keepFolders = false end   -- blind: no source folder names in the project either
   local path = folderPath(c.track)
   if keepFolders then
     for _, f in ipairs(path) do parent = PB.folderFor(parent, f) end
@@ -2868,6 +3376,7 @@ function PB.trackForClip(rootIdx, c, s, e, keepFolders)
     for _, f in ipairs(path) do names[#names + 1] = f.name end
     name = table.concat(names, ' / ') .. ' / ' .. c.trackName .. label
   end
+  if blindCopy then name = blindCopy.code end   -- blind: the copy is named by its code only
   local pi = PB.indexOf(parent)
   for _, tr in ipairs(PB.childrenOf(pi)) do
     if trackTag(tr) ~= 'text' and reaper.GetMediaTrackInfo_Value(tr, 'I_FOLDERDEPTH') ~= 1
@@ -2990,7 +3499,7 @@ function PB.removeClips(clips)
   reaper.Undo_EndBlock('Presenter: remove from presentation', -1)
   reaper.UpdateArrange()
   cache.state = -1
-  local what = (n == 1 and #clips == 1) and clips[1].trackName or (n .. ' clips')
+  local what = (n == 1 and #clips == 1) and UI.clipLabel(clips[1]) or (n .. ' clips')
   setStatus('Removed ' .. what .. ' from the presentation  (Ctrl+Z to undo)', COL.accent)
 end
 
@@ -3153,7 +3662,7 @@ function PB.drawAddPopup()
   if not ImGui.BeginPopupModal(ctx, 'Add to presentation##presenter', true) then PB.addOnly = nil; return end
 
   ImGui.TextColored(ctx, COL.accent, PB.addOnly
-    and ('Add %s to:'):format(PB.addOnly.trackName .. (PB.addOnly.takeLabel and ('  |  ' .. PB.addOnly.takeLabel) or ''))
+    and ('Add %s to:'):format(UI.clipLabel(PB.addOnly))
     or ('Add %d selected clip%s to:'):format(count, count == 1 and '' or 's'))
   if ImGui.RadioButton(ctx, 'A new section', PB.addTarget.new) then PB.addTarget.new, PB.addTarget.region = true, nil end
   if PB.addTarget.new then
@@ -3214,8 +3723,7 @@ function PB.drawReviewPopup()
     local c = e.clip
     if ImGui.SmallButton(ctx, 'x##unsel' .. k) then removeKey = key end
     ImGui.SameLine(ctx)
-    ImGui.Text(ctx, ('%s%s   (%s)'):format(c.trackName, c.takeLabel and ('  |  ' .. c.takeLabel) or '',
-      e.region or 'no region'))
+    ImGui.Text(ctx, ('%s   (%s)'):format(UI.clipLabel(c), e.region or 'no region'))
   end
   if removeKey then PB.setSelected(PB.selection[removeKey].clip, false) end
   ImGui.Spacing(ctx)
@@ -3538,7 +4046,7 @@ function PB.drawListBar(clips, region, hasFolders)
         end
       end
       ImGui.SameLine(ctx, 0, 4)
-      if topToggle('Tracks & folders', PB.showTrackEditor) then PB.showTrackEditor = not PB.showTrackEditor end
+      if not cfg.blind and topToggle('Tracks & folders', PB.showTrackEditor) then PB.showTrackEditor = not PB.showTrackEditor end
       if #PB.selOrder > 0 and region then
         ImGui.SameLine(ctx, 0, 4)
         if coloredButton(('+ Add %d from Overview here'):format(#PB.selOrder), 0, 0, 'switch') then
@@ -3557,7 +4065,7 @@ function PB.drawListBar(clips, region, hasFolders)
   ImGui.PopStyleVar(ctx)
   ImGui.PopFont(ctx)
 
-  if currentView == 'presentation' and PB.showTrackEditor and presRootIndex() then
+  if currentView == 'presentation' and PB.showTrackEditor and presRootIndex() and not cfg.blind then
     ImGui.Spacing(ctx)
     PB.drawTrackEditor()
     ImGui.Separator(ctx)
@@ -3591,7 +4099,7 @@ PB.drawSettingsBody = function(clips)
   ch, cfg.folders = ImGui.Checkbox(ctx, 'Group clips by folder', cfg.folders); any = any or ch
   ch, cfg.restoreOnClose = ImGui.Checkbox(ctx, 'Put active takes and lanes back when the panel closes',
     cfg.restoreOnClose); any = any or ch
-  ch, cfg.showFiles = ImGui.Checkbox(ctx, 'Show file names (breaks blinding)', cfg.showFiles); any = any or ch
+  ImGui.TextColored(ctx, COL.dim, 'File names are hidden in Blind mode (top row). Hover a take chip to see its name.')
   ch, cfg.notesOpen = ImGui.Checkbox(ctx, 'Notes open by default', cfg.notesOpen)
   if ch then noteGen = noteGen + 1; any = true end    -- re-apply to every note
   ch, cfg.noteImgHeight = ImGui.SliderInt(ctx, 'Note image height', cfg.noteImgHeight, 60, 600); any = any or ch
@@ -3634,6 +4142,12 @@ local function draw()
   local s, e, title, hdr, region = currentTrial(t)
   cache.curS = s
   local clips = clipsIn(s, e, t, region)
+  -- One unit per row (plain clip / takes / lanes). Blind mode shuffles them and gives them letters.
+  local units = UI.buildUnits(clips)
+  if cfg.blind then units = UI.shuffled(units, s) end
+  UI.assignBlind(cfg.blind and units or {})
+  if BL.revealS ~= nil and BL.revealS ~= s then BL.revealS = nil end   -- leaving the region hides it again
+  local firstClip = units[1] and UI.unitRep(units[1]) or nil
   local shared = sharedMarkersIn(s, e, clips)
   local noteRows = assignNotes(notesIn(s, e, t, hdr, region), clips)
   local pts = navPoints()
@@ -3672,9 +4186,19 @@ local function draw()
   end
   local cvW = ImGui.CalcTextSize(ctx, '      Compact view') + 24
   local setW = ImGui.CalcTextSize(ctx, 'Settings') + 24
+  local blW = ImGui.CalcTextSize(ctx, '      Blind') + 24
   ImGui.SameLine(ctx)
-  ImGui.SetCursorPosX(ctx, topX + math.max(0, fullW - cvW - setW - 6))
+  ImGui.SetCursorPosX(ctx, topX + math.max(0, fullW - cvW - setW - blW - 12))
   if coloredButton('Settings##open', 0, 0) then PB.openSettings = true end
+  ImGui.SameLine(ctx, 0, 6)
+  if topToggle('Blind', cfg.blind, 'blind') then
+    if cfg.blind then BL.ask = 'off'
+    else cfg.blind, BL.revealS, PB.inlineRename = true, nil, nil; saveCfg() end
+  end
+  if ImGui.IsItemHovered(ctx) then
+    ImGui.SetTooltip(ctx, cfg.blind and 'Blind mode is on. Click to turn it off (asks first).'
+      or 'Blind mode: hide names, colours, notes and lengths, and shuffle the rows.')
+  end
   ImGui.SameLine(ctx, 0, 6)
   if topToggle('Compact view', compact) then toggleCompact() end
   ImGui.PopStyleVar(ctx)
@@ -3695,7 +4219,7 @@ local function draw()
     if playing then
       pauseClip()
     else
-      local c = activeClip or clips[1]
+      local c = activeClip or firstClip
       if c then anchorRow(c); toggleClip(c) end      -- resumes from where it was paused
     end
   end
@@ -3740,11 +4264,12 @@ local function draw()
     ImGui.TextColored(ctx, status.col, '   ' .. status.text)
   end
   ImGui.Spacing(ctx)
+  if cfg.blind then UI.drawBlindBanner(s) end
 
   local bodyOpen = false
   if compact then
     ImGui.Separator(ctx)
-    drawClipChips(clips, activeClip)
+    drawClipChips(units, activeClip)
   else
   -- Everything above stays put; the region text and the clips scroll in a child
   -- window. (Skipped when there is almost no room, so the window itself is used.)
@@ -3814,8 +4339,8 @@ local function draw()
 
   ------------------------------------------------ shared markers
   if #shared > 0 then
-    drawMarkerButtons(shared, 'shared', COL.sharedMarker, function(m)
-      jumpToMarker(activeClip or clips[1], m.off)
+    drawMarkerButtons(UI.shownMarkers(shared), 'shared', COL.sharedMarker, function(m)
+      jumpToMarker(activeClip or firstClip, m.off)
     end)
     ImGui.Spacing(ctx)
   end
@@ -3829,20 +4354,21 @@ local function draw()
   -- Bar above the clips: PB.selection (Overview) or builder (Presentation),
   -- plus Expand all / Collapse all when there are folders
   local hasFolders = false
-  if cfg.folders then
+  local useFolders = cfg.folders and not cfg.blind        -- blind mode flattens folders (their names say who is who)
+  if useFolders then
     for _, c in ipairs(clips) do if c.path and #c.path > 0 then hasFolders = true break end end
   end
   PB.drawListBar(clips, region, hasFolders)
 
-  local rows = mergeRows(clips, noteRows)
-  if cfg.folders then
+  local rows = mergeRows(units, UI.hiddenNow() and {} or noteRows)
+  if useFolders then
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_IndentSpacing, 22)
     drawNode(buildTree(rows), activeClip, shared)
     ImGui.PopStyleVar(ctx)
     forceOpen = nil
   else
     for _, row in ipairs(rows) do
-      if row.clip then drawClip(row.clip, row.i, activeClip, shared) else drawNoteRow(row.note) end
+      if row.unit then UI.drawUnit(row.unit, row.i, activeClip, shared) else drawNoteRow(row.note) end
     end
   end
 
@@ -3851,31 +4377,43 @@ local function draw()
   end -- compact / full
 
   ------------------------------------------------ keyboard
-  -- Only while this panel has the keyboard focus and no popup is open (IsKeyPressed
-  -- itself ignores focus, so without this the keys fire from other REAPER windows)
+  -- Shortcut with the focused route: fires only while this panel (or its child) has the keyboard focus
+  -- (IsKeyPressed ignores focus, so it used to fire from other REAPER windows). Also off while a popup is
+  -- open or a text box is being edited.
   local keysOn = ImGui.IsWindowFocused(ctx, ImGui.FocusedFlags_RootAndChildWindows)
     and not ImGui.IsPopupOpen(ctx, '', ImGui.PopupFlags_AnyPopup)
   if keysOn and not ImGui.IsAnyItemActive(ctx) then
-    for i, key in ipairs(KEYS) do
-      if clips[i] and ImGui.IsKeyPressed(ctx, key, false) then anchorRow(clips[i]); toggleClip(clips[i]) end
+    local function pressed(key, repeating)
+      return ImGui.Shortcut(ctx, key, ImGui.InputFlags_RouteFocused | (repeating and ImGui.InputFlags_Repeat or 0))
     end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_Space, false) then playPauseSelected() end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_A, false) then cfg.ab = not cfg.ab; saveCfg() end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_S, false) then    -- Default <-> Smooth (turns A/B on)
+    for i, key in ipairs(KEYS) do
+      if units[i] and pressed(key) then local c = UI.unitRep(units[i]); anchorRow(c); toggleClip(c) end
+    end
+    if pressed(ImGui.Key_Space) then playPauseSelected() end
+    if pressed(ImGui.Key_A) then cfg.ab = not cfg.ab; saveCfg() end
+    if pressed(ImGui.Key_S) then    -- Default <-> Smooth (turns A/B on)
       if not cfg.ab then cfg.ab, smoothAB = true, true else smoothAB = not smoothAB end
       saveCfg()
     end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_L, false) then setLoop(not cfg.loop) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_C, false) then toggleCompact() end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_M, false) then startMarker(activeClip or clips[1]) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_N, false) then startNote(activeClip or clips[1]) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_LeftArrow, false) and prevPos then jumpTo(prevPos) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_RightArrow, false) and nextPos then jumpTo(nextPos) end
+    if pressed(ImGui.Key_L) then setLoop(not cfg.loop) end
+    if pressed(ImGui.Key_C) then toggleCompact() end
+    if pressed(ImGui.Key_M) then local c = activeClip or firstClip; if c then startMarker(c) end end
+    if pressed(ImGui.Key_N) then local c = activeClip or firstClip; if c then startNote(c) end end
+    if pressed(ImGui.Key_LeftArrow) and prevPos then jumpTo(prevPos) end
+    if pressed(ImGui.Key_RightArrow) and nextPos then jumpTo(nextPos) end
+    -- Up / Down: previous / next take (or lane) of the selected row, at the same point
+    local up, down = pressed(ImGui.Key_UpArrow, true), pressed(ImGui.Key_DownArrow, true)
+    if (up or down) and activeClip then
+      for _, u in ipairs(units) do
+        if UI.unitClip(u, activeClip.key) then UI.stepUnit(u, up and -1 or 1) break end
+      end
+    end
   end
 
   ------------------------------------------------ settings
   drawMarkerPopup()
   drawNotePopup()
+  UI.drawBlindPopup(s)
 
   PB.drawTextPopup()
   PB.drawAddPopup()
@@ -3923,7 +4461,17 @@ local function loop()
   if visible then
     PB.dockedLast = ImGui.IsWindowDocked(ctx)
     if resetScroll then ImGui.SetScrollY(ctx, 0); resetScroll = false end
-    draw()
+    if PB.drawError then
+      ImGui.TextColored(ctx, 0xFF6B6BFF, 'Panel error: ' .. PB.drawError)
+      if coloredButton('Try again##drawerr', 0, 0) then PB.drawError = nil end
+    else
+      local mark = openCount()
+      local okDraw, err = pcall(draw)
+      if not okDraw then
+        unwindOpen(ctx, mark)       -- close whatever the failed frame left open, so End() below is still valid
+        PB.drawError = (tostring(err):gsub('\n.*', ''))
+      end
+    end
     prefetch(cache.curS)
     winW, winH = ImGui.GetWindowSize(ctx)
     if not PB.dockedLast then

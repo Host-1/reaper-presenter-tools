@@ -89,7 +89,8 @@ function R.GetParentTrack(tr)
   return nil
 end
 function R.GetMediaTrackInfo_Value(tr, k)
-  if k == "B_SHOWINTCP" then return tr.hidden and 0 or 1
+  if k == "IP_TRACKNUMBER" then return tr.idx + 1
+  elseif k == "B_SHOWINTCP" then return tr.hidden and 0 or 1
   elseif k == "I_FOLDERDEPTH" then return tr.depth
   elseif k == "I_FREEMODE" then return tr.freemode
   elseif k == "I_NUMFIXEDLANES" then return tr.nlanes
@@ -123,7 +124,12 @@ function R.GetMediaItemInfo_Value(it, k)
   elseif k == "D_VOL" then return 1 end
   return 0
 end
-function R.SetMediaItemInfo_Value() return true end
+function R.SetMediaItemInfo_Value(it, k, v)
+  if k == "D_POSITION" then it.pos = v elseif k == "D_LENGTH" then it.len = v elseif k == "I_FIXEDLANE" then it.lane = v
+  elseif k == "I_CUSTOMCOLOR" then it.color = v end
+  FR.changes = FR.changes + 1
+  return true
+end
 function R.GetSetMediaItemInfo_String(it, k, v, set)
   if k == "P_NOTES" then if set then it.notes = v end return true, it.notes end
   if k == "GUID" then return true, it.guid end
@@ -146,10 +152,46 @@ function R.GetMediaItemTakeInfo_Value(tk, k)
 end
 function R.GetMediaItemTake_Peaks() return 0 end   -- 0 peaks: the panel shows 'still building' and retries
 function R.new_array() return { clear = function() end, table = function() return {} end } end
-function R.GetNumTakeMarkers() return 0 end
+function R.GetNumTakeMarkers(tk) return #(tk.markers or {}) end
+function R.GetTakeMarker(tk, k) local m = tk.markers[k + 1] return m.pos, m.name, m.color or 0 end
 function R.GetMediaItem_Track(it) return it.track end
 function R.SelectAllMediaItems() end
 function R.SetMediaItemSelected() end
+
+-- presentation building (copies of clips go onto new tracks)
+function R.InsertTrackAtIndex(idx)
+  local t = { name = "", depth = 0, items = {}, ext = {}, laneplays = {}, freemode = 0, nlanes = 0, lanenames = {}, guid = guid() }
+  table.insert(FR.tracks, idx + 1, t)
+  for i, tr in ipairs(FR.tracks) do tr.idx = i - 1 end
+  FR.changes = FR.changes + 1
+end
+function R.DeleteTrack(tr)
+  table.remove(FR.tracks, tr.idx + 1)
+  for i, t in ipairs(FR.tracks) do t.idx = i - 1 end
+end
+function R.AddMediaItemToTrack(tr)
+  local it = { track = tr, pos = 0, len = 1, notes = "", lane = 0, active = 1, takes = {}, guid = guid() }
+  tr.items[#tr.items + 1] = it
+  FR.items[#FR.items + 1] = it
+  return it
+end
+function R.SetItemStateChunk(it, chunk) it.chunk = chunk return true end
+function R.DeleteTrackMediaItem(tr, it)
+  for i, x in ipairs(tr.items) do if x == it then table.remove(tr.items, i) break end end
+  for i, x in ipairs(FR.items) do if x == it then table.remove(FR.items, i) break end end
+  FR.changes = FR.changes + 1
+  return true
+end
+function R.AddProjectMarker2(_, isrgn, s, e, name)
+  if isrgn then FR.regions[#FR.regions + 1] = { s = s, e = e, name = name } end
+  FR.changes = FR.changes + 1
+  return #FR.regions
+end
+function R.SetProjectMarker(idx, isrgn, s, e, name)
+  local r = FR.regions[idx]
+  if r then r.s, r.e, r.name = s, e, name end
+  return true
+end
 
 -------------------------------------------------------- regions, markers --
 function R.EnumProjectMarkers3(_, i)
