@@ -285,8 +285,8 @@ test("takes: the number key plays the row's active take; the ticks select all ta
   key(H, "Key_2"); H.frame(2)
   ok(H.FR.playstate ~= 0, "row 2 plays")
   H.FI.clicks["##sel2"] = true; H.frame(2)
-  H.FI.clicks["Review##selrev"] = true; H.frame(1)
-  ok(true)
+  H.FI.clicks["Add to presentation...##seladd"] = true; H.frame(2)
+  ok(H.FI.text_has("Add 3 selected clips to:"), "ticking the takes row selects all 3 takes")
 end)
 
 ------------------------------------------------------------------ lanes --
@@ -522,14 +522,22 @@ test("blind: a copy made for the presentation is named by its code, with no sour
   local H = blind_session(); H.FI.clicks["      Blind##togBlind"] = true; H.frame(3)
   H.FI.clicks["##sel1"] = true; H.frame(1)
   H.FI.clicks["##sel2"] = true; H.frame(1)
-  H.FI.clicks["Add to presentation...##seladd"] = true; H.frame(3)
-  H.FI.api.OpenPopup(nil, "Add to the presentation##presenter")
-  H.frame(2)
+  H.FI.clicks["Add to presentation...##seladd"] = true; H.frame(2)
+  local add
+  for _, l in ipairs(H.FI.seq) do if l:find("^Add %d+ clips?$") then add = l end end
+  ok(add, "the add dialog is open")
+  H.FI.clicks[add] = true; H.frame(3)
   local names = {}
   for _, tr in ipairs(H.FR.tracks) do names[#names + 1] = tr.name end
-  -- the add dialog is a popup; accept it by calling the panel's own button if drawn
-  local seq = table.concat(H.FI.seq, "|")
-  ok(true, seq)
+  local made = {}
+  for i = 8, #names do made[#made + 1] = names[i] end      -- tracks the panel created (after the session's own)
+  ok(#made >= 2, "presentation tracks were made: " .. table.concat(names, ","))
+  for _, n in ipairs(made) do
+    ok(not n:find("ZZ", 1, true), "a copy track carries a source name: " .. n)
+  end
+  local letters = 0
+  for _, n in ipairs(made) do if n:match("^%u$") then letters = letters + 1 end end
+  ok(letters >= 2, "copies are named by letter: " .. table.concat(made, ","))
 end)
 
 test("keys: Up/Down also respect focus and popups (no take stepping from another window)", function()
