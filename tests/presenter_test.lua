@@ -375,7 +375,7 @@ local function everything_drawn(H)          -- every string the fake saw in the 
   local all = {}
   local function add(t) for _, v in ipairs(t) do all[#all + 1] = tostring(v) end end
   add(FI.seq); add(FI.texts); add(FI.draw_texts); add(FI.selectables)
-  for k, v in pairs(FI.tooltips) do all[#all + 1] = tostring(k); all[#all + 1] = tostring(v) end
+  for k, v in pairs(FI.frame_tooltips) do all[#all + 1] = tostring(k); all[#all + 1] = tostring(v) end
   for k, v in pairs(FI.previews) do all[#all + 1] = tostring(k); all[#all + 1] = tostring(v) end
   add(FI.begin_log)
   all[#all + 1] = tostring(FI.context_label)

@@ -9,8 +9,6 @@
 --   FI.scroll_calls             { window = name, kind = "window"|"child", y }: which window each SetScrollY hit
 --   FI.avail_w / FI.avail_h     override GetContentRegionAvail;  FI.row_shift moves GetCursorScreenPos (a row that moved)
 --   FI.sizes[label]             height recorded for a widget (see FI.height_of): used by the vertical-space measurements
--- Also fixes two things the panel needs: PopupFlags_AnyPopup = AnyPopupId | AnyPopupLevel, and IsPopupOpen honouring
--- AnyPopupId (the hardened fake compares the id only, so "any popup open" was always false).
 local FI = FAKE_IMGUI
 local api = FI.api
 local C = FI.constant
@@ -39,7 +37,7 @@ function FI.reset_frame()
   reset_frame()
   FI.seq, FI.begin_log, FI.child_log, FI.sy = {}, {}, {}, 0
   FI.toolbar_h, FI.body_h = nil, nil
-  FI.draw_texts, FI.bcol, FI.tooltips = {}, {}, {}   -- per-frame records (the hardened fake keeps tooltips forever)
+  FI.draw_texts, FI.bcol = {}, {}
   for k in pairs(lay) do lay[k] = nil end
 end
 
@@ -193,14 +191,6 @@ function api.GetContentRegionAvail(ctx)
 end
 function api.GetCursorScreenPos() FI.sy = FI.sy + 40; return 0, FI.sy + FI.row_shift end
 
--- popups: AnyPopup = AnyPopupId | AnyPopupLevel; IsPopupOpen(ctx, '', AnyPopupId) = "is any popup open"
-rawset(api, "PopupFlags_AnyPopup", C("PopupFlags_AnyPopupId") | C("PopupFlags_AnyPopupLevel"))
-local o_ispop = api.IsPopupOpen
-function api.IsPopupOpen(ctx, id, flags)
-  if flags and flags & C("PopupFlags_AnyPopupId") ~= 0 then return next(FI.popups) ~= nil end
-  return o_ispop(ctx, id, flags)
-end
-
 -- numeric getters the panel does arithmetic on (the hardened fake's catch-all returns nothing)
 function api.GetCursorPos(ctx) return 0, api.GetCursorPosY(ctx) end
 function api.GetCursorPosX() return 0 end
@@ -210,7 +200,3 @@ function api.GetMousePos() return 0, 0 end
 function api.GetKeyMods() return FI.mods or 0 end
 function api.GetTextLineHeight() return 16 end
 function api.GetFrameHeight() return 30 end
-
--- The hardened fake's catch-all only makes constants for names like Key_A: Key_1..Key_9 (digit after the underscore)
--- come back as functions, so a test could never press a number key. Define them here (reported to the Verifier).
-for d = 0, 9 do rawset(api, "Key_" .. d, C("Key_" .. d)) end

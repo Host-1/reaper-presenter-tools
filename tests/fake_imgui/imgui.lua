@@ -19,6 +19,7 @@ local constants, next_id, group_bits, mod_bit = {}, 1, {}, 16
 local COMPOSITE = {
   FocusedFlags_RootAndChildWindows = { "FocusedFlags_RootWindow", "FocusedFlags_ChildWindows" },
   HoveredFlags_RootAndChildWindows = { "HoveredFlags_RootWindow", "HoveredFlags_ChildWindows" },
+  PopupFlags_AnyPopup = { "PopupFlags_AnyPopupId", "PopupFlags_AnyPopupLevel" }, -- api/popup.cpp:144
   TreeNodeFlags_CollapsingHeader = { "TreeNodeFlags_Framed", "TreeNodeFlags_NoTreePushOnOpen", "TreeNodeFlags_NoAutoOpenOnLog" },
 }
 local constant
@@ -205,7 +206,8 @@ function FI.reset_frame()
   FI.end_frame()
   FI.frame = FI.frame + 1
   FI.texts, FI.buttons, FI.selectables, FI.previews = {}, {}, {}, {}
-  FI.clipper_log, FI.shortcuts, FI.cursor_y = {}, {}, {}
+  FI.frame_tooltips = {} -- a tooltip lasts one frame; FI.tooltips keeps every tooltip ever set (panel_test's coverage check)
+  FI.clipper_log, FI.shortcuts, FI.cursor_y, FI.frame_tooltip = {}, {}, {}, nil
   for path, y in pairs(FI.pending_scroll or {}) do FI.scroll[path] = y end -- SetScrollY lands on the next frame
   FI.pending_scroll = {}
 end
@@ -618,12 +620,23 @@ function api.TabItemButton(ctx, label) note_item(label, "TabItemButton") return 
 -- ---------------------------------------------------------------------------
 -- Popups and modals: EndPopup only when BeginPopup* returned true
 -- ---------------------------------------------------------------------------
-function api.OpenPopup(ctx, id) FI.popups[id] = true end
-function api.IsPopupOpen(ctx, id) return FI.popups[id] or false end
+-- Popups live on levels: one opened while N popups are being drawn sits at level N. IsPopupOpen tests the current
+-- level (api/popup.cpp:104): by id; any id with PopupFlags_AnyPopupId; any level too with PopupFlags_AnyPopup.
+FI.popup_level = FI.popup_level or {}
+local function popup_depth() local n = 0 for _, b in ipairs(blocks) do if b.kind == "popup" then n = n + 1 end end return n end
+function api.OpenPopup(ctx, id) FI.popups[id] = true FI.popup_level[id] = popup_depth() end
+function api.IsPopupOpen(ctx, id, flags)
+  local any_id, any_level = has(flags, "PopupFlags_AnyPopupId"), has(flags, "PopupFlags_AnyPopupLevel")
+  local cur = popup_depth()
+  for pid, open in pairs(FI.popups) do
+    if open and (any_id or pid == id) and (any_level or (FI.popup_level[pid] or 0) == cur) then return true end
+  end
+  return false
+end
 function api.CloseCurrentPopup(ctx)
   local p = innermost("popup")
   if FI.balance and not p then fail("CloseCurrentPopup() called outside a popup") end
-  if p then FI.popups[p.name] = nil end
+  if p then FI.popups[p.name] = nil FI.popup_level[p.name] = nil end
 end
 function api.BeginPopup(ctx, id)
   if not FI.popups[id] then return false end
@@ -641,14 +654,14 @@ function api.BeginPopupModal(ctx, name, p_open)
 end
 function api.BeginPopupContextItem(ctx, id)
   local key = id or FI.last
-  if FI.context_popups[key] then FI.popups[key] = true end
+  if FI.context_popups[key] and not FI.popups[key] then FI.popups[key] = true FI.popup_level[key] = popup_depth() end
   if not FI.popups[key] then return false end
   push_block("popup", "BeginPopupContextItem", key)
   return true
 end
 function api.BeginPopupContextWindow(ctx, id)
   local key = id or "window_context"
-  if FI.context_popups[key] then FI.popups[key] = true end
+  if FI.context_popups[key] and not FI.popups[key] then FI.popups[key] = true FI.popup_level[key] = popup_depth() end
   if not FI.popups[key] then return false end
   push_block("popup", "BeginPopupContextWindow", key)
   return true
@@ -686,7 +699,11 @@ function api.Unindent(ctx, w) FI._unindent_w = w pop_stack("Indent", "Unindent")
 -- Keyboard: IsKeyPressed (no focus check, repeats by default) and Shortcut (focused window by default)
 -- ---------------------------------------------------------------------------
 function api.IsItemHovered() return FI.hover_all end
-function api.SetTooltip(ctx, t) if FI.last then FI.tooltips[FI.last] = t end end
+function api.SetTooltip(ctx, t)
+  FI.frame_tooltips = FI.frame_tooltips or {}
+  FI.frame_tooltip = t -- SetTooltip overrides any earlier call this frame (api/popup.cpp:202)
+  if FI.last then FI.tooltips[FI.last] = t; FI.frame_tooltips[FI.last] = t end
+end
 function api.IsKeyPressed(ctx, key, rep)
   FI.queried_keys[key] = true
   if FI.keys[key] then FI.keys[key] = nil return true end
@@ -714,7 +731,7 @@ function api.GetFrameHeightWithSpacing() return 24 end
 function api.GetFontSize() return 13 end
 
 setmetatable(api, { __index = function (t, name)
-  if name:match("^[A-Z][A-Za-z]*_[A-Za-z]") and not name:match("^ListClipper_") and not name:match("^DrawList_") then return constant(name) end
+  if name:match("^[A-Z][A-Za-z]*_[A-Za-z0-9]") and not name:match("^ListClipper_") and not name:match("^DrawList_") then return constant(name) end
   return function () end -- any other call (layout, styles) is a no-op
 end })
 
