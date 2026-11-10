@@ -428,6 +428,22 @@ test("blind: every other surface is clean too: playing, popups for notes and mar
   eq(#leaks(H), 0, "compact view: " .. table.concat(leaks(H), ", "))
 end)
 
+test("blind: turning Blind on clears the status line (no track name stays up)", function()
+  local H = blind_session(); H.FI.hover_all = true
+  H.frame(2)
+  H.FR.playpos = 1.2
+  key(H, "Key_1"); H.frame(2)
+  key(H, "Key_N"); H.frame(2)
+  H.FI.inputs["##notetext"] = "hello"
+  H.FI.enter["##notetext"] = true
+  H.frame(3)
+  ok(everything_drawn(H):find("Note saved on", 1, true), "the status line shows after saving a note")
+  H.FI.clicks["      Blind##togBlind"] = true
+  H.frame(2)
+  eq(#leaks(H), 0, "status leak: " .. table.concat(leaks(H), ", "))
+  ok(not everything_drawn(H):find("Note saved on", 1, true), "status line is gone")
+end)
+
 test("blind: colours are neutral, no waveform, no total length, nothing to rename", function()
   local H = blind_session(); H.FI.hover_all = true
   H.FI.clicks["      Blind##togBlind"] = true; H.frame(3)

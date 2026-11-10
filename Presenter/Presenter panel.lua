@@ -2470,7 +2470,7 @@ function UI.drawBlindBanner(s)
   ImGui.SameLine(ctx, cx + availW - btnW - 10)
   ImGui.BeginDisabled(ctx, (not revealed) and s == nil)
   if coloredButton(label .. '##blindreveal', btnW, 0) then
-    if revealed then BL.revealS = nil else BL.ask = 'reveal' end
+    if revealed then BL.revealS, status = nil, nil else BL.ask = 'reveal' end
   end
   ImGui.EndDisabled(ctx)
   ImGui.PopStyleVar(ctx)
@@ -4175,7 +4175,7 @@ local function draw()
   local units = UI.buildUnits(clips)
   if cfg.blind then units = UI.shuffled(units, s) end
   UI.assignBlind(cfg.blind and units or {})
-  if BL.revealS ~= nil and BL.revealS ~= s then BL.revealS = nil end   -- leaving the region hides it again
+  if BL.revealS ~= nil and BL.revealS ~= s then BL.revealS, status = nil, nil end   -- leaving the region hides it again
   local firstClip = units[1] and UI.unitRep(units[1]) or nil
   local shared = sharedMarkersIn(s, e, clips)
   local noteRows = assignNotes(notesIn(s, e, t, hdr, region), clips)
@@ -4222,7 +4222,7 @@ local function draw()
   ImGui.SameLine(ctx, 0, 6)
   if topToggle('Blind', cfg.blind, 'blind') then
     if cfg.blind then BL.ask = 'off'
-    else cfg.blind, BL.revealS, PB.inlineRename = true, nil, nil; saveCfg() end
+    else cfg.blind, BL.revealS, PB.inlineRename, status = true, nil, nil, nil; saveCfg() end
   end
   if ImGui.IsItemHovered(ctx) then
     ImGui.SetTooltip(ctx, cfg.blind and 'Blind mode is on. Click to turn it off (asks first).'
