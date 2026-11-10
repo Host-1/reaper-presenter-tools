@@ -565,7 +565,7 @@ end)
 test("vertical space: takes and lanes use far less height than the v4.5 layout (numbers in tests/measure_presenter.py)", function()
   local M = assert(loadfile(HERE .. "/measure.lua"))(HERE, PANEL)
   local BASE = { 1017, 2680, 1117, 3308 }       -- scrolling body height on ac02c08 (v4.5 rows), same layout model
-  local limit = { 1.0, 0.40, 0.55, 0.55 }
+  local limit = { 0.86, 0.28, 0.49, 0.44 }
   for i, spec in ipairs(M.sessions()) do
     local _, body = M.measure(spec)
     ok(body and body <= BASE[i] * limit[i], ("%s: body %s px, allowed %s"):format(spec.name, tostring(body), BASE[i] * limit[i]))

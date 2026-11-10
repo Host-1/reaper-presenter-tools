@@ -1603,6 +1603,13 @@ local function removeMarker(c, m)
   end
 end
 
+local function drawAddMarkerButton(idPrefix, onAdd)
+  ImGui.PushStyleColor(ctx, ImGui.Col_Text, COL.liveNote)
+  if coloredButton('+ Marker  [M]##add' .. idPrefix, 0, 0) then onAdd() end
+  if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Add a take marker here at the current moment (M)') end
+  ImGui.PopStyleColor(ctx)
+end
+
 -- Small wrapping row of marker jump buttons. With onAdd, the row starts
 -- with a "+ Marker" button (adds a take marker at the current moment).
 local function drawMarkerButtons(list, idPrefix, color, onClick, onAdd, onRemove)
@@ -1614,10 +1621,7 @@ local function drawMarkerButtons(list, idPrefix, color, onClick, onAdd, onRemove
   local avail = ImGui.GetContentRegionAvail(ctx)
   local lineW = 0
   if onAdd then
-    ImGui.PushStyleColor(ctx, ImGui.Col_Text, COL.liveNote)
-    if coloredButton('+ Marker  [M]##add' .. idPrefix, 0, 0) then onAdd() end
-    if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Add a take marker here at the current moment (M)') end
-    ImGui.PopStyleColor(ctx)
+    drawAddMarkerButton(idPrefix, onAdd)
     lineW = ImGui.CalcTextSize(ctx, '+ Marker  [M]') + padX * 2
   end
   ImGui.PushStyleColor(ctx, ImGui.Col_Text, color)
@@ -2162,16 +2166,20 @@ function UI.drawNoteAndMarkers(c, i, withMarkerRow)
   if coloredButton('+ Note  [N]##addnote' .. i, 0, 0) then startNote(c) end
   if ImGui.IsItemHovered(ctx) then ImGui.SetTooltip(ctx, 'Add a note to this clip (N)') end
   ImGui.PopStyleColor(ctx)
+  if withMarkerRow then       -- "+ Marker" shares the "+ Note" line (D-016)
+    ImGui.SameLine(ctx)
+    drawAddMarkerButton('tm' .. i .. '_', function() startMarker(c) end)
+  end
   ImGui.PopStyleVar(ctx)
   ImGui.PopFont(ctx)
   if #entries > 0 then ImGui.SameLine(ctx) end
   drawNotes(c.key, entries)
 
-  -- Take markers: "+ Marker" first, then a jump button per marker (numbers in blind mode; no remove there)
-  if withMarkerRow or #c.markers > 0 then
-    drawMarkerButtons(UI.shownMarkers(c.markers), 'tm' .. i .. '_', COL.takeMarker,
-      function(m) jumpToMarker(c, m.off) end,
-      function() startMarker(c) end,
+  -- Take markers: a jump button per marker (numbers in blind mode; no remove there)
+  local shown = UI.shownMarkers(c.markers)
+  if #shown > 0 then
+    drawMarkerButtons(shown, 'tm' .. i .. '_', COL.takeMarker,
+      function(m) jumpToMarker(c, m.off) end, nil,
       (not hidden) and function(m) removeMarker(c, m) end or nil)
   end
 end
