@@ -2915,7 +2915,9 @@ local function drawNotePopup()
 
   -- Existing notes: shown as text, or editable after "Edit existing notes"
   local multiActive = false
-  if d.editAll then
+  if UI.hiddenNow() then
+    ImGui.TextColored(ctx, COL.dim, '(existing notes are hidden in Blind mode)')
+  elseif d.editAll then
     local _
     _, d.existing = ImGui.InputTextMultiline(ctx, '##existing', d.existing, -1, 140)
     multiActive = ImGui.IsItemActive(ctx)

@@ -39,7 +39,7 @@ function FI.reset_frame()
   reset_frame()
   FI.seq, FI.begin_log, FI.child_log, FI.sy = {}, {}, {}, 0
   FI.toolbar_h, FI.body_h = nil, nil
-  FI.draw_texts, FI.bcol = {}, {}
+  FI.draw_texts, FI.bcol, FI.tooltips = {}, {}, {}   -- per-frame records (the hardened fake keeps tooltips forever)
   for k in pairs(lay) do lay[k] = nil end
 end
 
