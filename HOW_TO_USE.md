@@ -40,8 +40,7 @@ move between tabs. The bar above the clips works on whatever is ticked:
   to the track's colour. In Presentation it only changes the copies, never the originals.
 - **Right-click a clip** for the same things on just that clip: colour, select, and
   **Add to presentation...** (Overview) or **Remove from presentation** (Presentation).
-  It also has **Rename track...** (the clip's button label) and **Rename take...** (the file name,
-  shown with "Show file names" in Settings).
+  It also has **Rename track...** (the clip's button label) and **Rename take...**.
 - **Right-click a folder header** to rename or recolour that folder.
 
 To build the presentation:
@@ -121,3 +120,15 @@ Everything is a normal REAPER edit: saved with the project, **Ctrl+Z** undoes it
 | N | Add note |
 
 Keys work when the panel has focus. Click it once if they don't respond.
+
+
+## Takes, lanes and Blind mode
+
+- **Takes**: an item with several takes is one row. The takes are chips (`t1 t2 t3`) in front of the seek bar;
+  click one to play it, click another to switch at the same point, or press Up/Down. The light outline is the
+  item's active take; a paused take is amber.
+- **Lanes**: a track with clips on several lanes is a slim header with one thin row per lane. Click a lane to
+  switch to it at the same point; Up/Down step through the lanes.
+- **Blind** (top right, violet): hides names, colours, notes, marker names, lengths and waveforms, flattens
+  folders and shuffles the rows of each region (letters A, B, C). **Reveal this region...** and turning Blind off
+  both ask first. Cover REAPER's own track view before sharing your screen: it still shows the names.

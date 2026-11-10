@@ -13,7 +13,7 @@
 --     the ticked clips: Colour... (both views), Add to presentation... and
 --     Review (Overview), Remove (Presentation), Clear. Adding COPIES the clips
 --     into a new or existing section, lined up at the section's start, each
---     on a presentation track named after its source ("B | take 2"), inside
+--     on a presentation track named after its source ("B | take 2", or just the letter in Blind mode), inside
 --     copies of the source's folders (or, if chosen, with the folder path in
 --     the track name instead). The
 --     source stays as it is. In Presentation, hovering a clip shows an x at
@@ -47,21 +47,39 @@
 --     only tracks you've hidden from the track panel are left out.
 --
 --   TAKES
---     Every take in an item is its own clip ("Jo | take 2"). An item with
---     several takes gets its own collapsible group named after the track.
+--     An item with several takes is ONE row: the name button says "N takes",
+--     and the takes are chips (t1 t2 t3) in front of the seek bar. The chip
+--     with a light outline is the item's active take. Click a chip to play
+--     that take; while one plays, clicking another switches at the same point
+--     (even with A/B off, as takes share the item's timeline). Up/Down step to
+--     the previous/next take of the selected row. A paused take's chip is
+--     amber. Hover a chip for the take name. The number key plays the row's
+--     active take; ticking the row selects all its takes.
 --     Playing a take makes it the item's active take, so the arrange view
 --     shows the one you're hearing (this does change the project's active
---     take, as clicking it in REAPER would). A/B between takes of the same
---     item keeps position, like A/B between tracks.
+--     take, as clicking it in REAPER would).
 --     Each take plays only as long as its own audio: takes share the item's
 --     length, so a shorter take would otherwise loop to fill it.
 --
 --   LANES (REAPER 7 fixed item lanes)
 --     Items on every lane are picked up, not just the lane that's playing.
---     A track with audio on several lanes gets its own group named after the
---     track; buttons show the lane name ("Jo | lane 2", or your lane names).
---     Playing a clip makes its lane the only one that plays on that track.
---     A/B between lanes keeps position.
+--     A track with audio on several lanes is a slim header ("3 lanes") with
+--     one thin row per lane on a lane strip; each lane has its own time. One
+--     lane plays at a time: clicking another lane switches at the same point
+--     (Up/Down step lanes, the number key plays the group's last lane). A
+--     track with audio on only one lane is a plain row.
+--
+--   BLIND (top right; violet)
+--     Hides track, folder, take, lane and file names, clip and folder colours,
+--     item notes and marker names, clip lengths (elapsed time only) and
+--     waveforms, flattens folders, and shuffles the rows of each region. Rows
+--     are letters A, B, C...; the order comes from a seed stored in the
+--     project, so it stays the same when you reopen it. Region tabs, the big
+--     text and the cue stay. "Reveal this region..." (asks first) shows names
+--     for the current region only, until you leave it. Turning Blind off asks
+--     first. REAPER's own arrange view still shows names: cover it before
+--     sharing your screen. Copies added to the presentation while blind are
+--     named by their letter. The window title never changes.
 --
 --   PUTTING THINGS BACK
 --     Playing changes which take is active and which lane plays. By default
@@ -171,7 +189,8 @@
 --     volume, one undo step, and warns how many clips would go above -1 dBTP.
 --
 --   KEYS (while the panel has focus)
---     1-9 play/pause clip     Space play/pause selected clip     Left/Right previous/next tab
+--     1-9 play/pause row      Space play/pause selected clip     Left/Right previous/next tab
+--     Up/Down previous/next take or lane of the selected row
 --     A   toggle A/B mode     L     toggle loop     C   compact     M   add marker     N   add note     S   smooth A/B
 --
 --   Run the action again to close the panel. Requires ReaImGui 0.10+.

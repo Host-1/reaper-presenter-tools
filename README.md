@@ -59,7 +59,7 @@ Extensions > ReaPack > Synchronize packages pulls the latest versions.
 - **Levels** (Settings, top right): normalize this region or all clips in the view to a LUFS-I or peak target
   (default -23 LUFS-I) using REAPER's own loudness measurement; warns about clips that would go above -1 dBTP.
 
-Panel keys: 1-9 play/pause clip, Space play/pause the selected clip, Left/Right previous/next region, A A/B on/off, S switch A/B between Default and Smooth, L toggle loop, C compact view (just tabs, controls and small clip buttons; also top right), M add a take marker at the current moment of the playing/selected clip (also "+ Marker" at the start of each clip's marker row), N add a general note to the clip's Item notes (also "+ Note" at the start of each clip's notes line).
+Panel keys: 1-9 play/pause row, Up/Down previous/next take or lane, Space play/pause the selected clip, Left/Right previous/next region, A A/B on/off, S switch A/B between Default and Smooth, L toggle loop, C compact view (just tabs, controls and small clip buttons; also top right), M add a take marker at the current moment of the playing/selected clip (also "+ Marker" at the start of each clip's marker row), N add a general note to the clip's Item notes (also "+ Note" at the start of each clip's notes line).
 
 ## What's in this repo
 

@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased (4.6 work; folded into the single release entry by T-011)
+## Unreleased (4.6 work + takes, lanes, blind mode; folded into the single release entry at release, D-009)
+- Takes: an item with several takes is one row with a chip per take in front of the seek bar. One click or Up/Down switches take at the same point; a paused take shows amber (compact view too).
+- Lanes: a track with audio on several lanes is a slim header with a thin row per lane on a lane strip; a track using one lane is a plain row. Up/Down step lanes.
+- Blind mode (replaces "Show file names"): letters instead of names, shuffled order per region from a seed saved in the project, no colours, notes, marker names, lengths or waveforms, "Reveal this region..." and "off" both ask first.
+- A script error while drawing no longer stops the panel: it shows the message and a Try again button.
+- Up/Down keys; keys use REAPER's focus routing.
 - Pinned toolbar: the view tabs, region tabs and the play / A/B / Loop row stay at the top while the clips scroll underneath.
 - Collapsing the window with its title-bar arrow and opening it again now brings it back to the size it had, instead of staying tiny.
 - The window size is remembered between sessions (full view only; compact view still fits its own height).
