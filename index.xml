@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<index version="1" name="Presenter tools">
+  <category name="Presenter">
+    <reapack name="Presenter panel.lua" type="script" desc="Presenter panel: big-text region view with one-click exclusive clip playback">
+      <version name="4.7" time="2026-11-10T14:27:46Z">
+        <source main="main">https://github.com/Host-1/reaper-presenter-tools/raw/main/Presenter/Presenter%20panel.lua</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="tests">
+  </category>
+</index>

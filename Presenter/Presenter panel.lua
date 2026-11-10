@@ -1,5 +1,5 @@
 -- @description Presenter panel: big-text region view with one-click exclusive clip playback
--- @version 4.5
+-- @version 4.7
 -- @about
 --   A dockable ReaImGui window for presenting listening tests (e.g. over Zoom).
 --
