@@ -2813,7 +2813,7 @@ local function drawMarkerPopup()
   -- This clip's existing markers, for context
   if #d.clip.markers > 0 then
     ImGui.PushStyleColor(ctx, ImGui.Col_Text, COL.dim)
-    for _, m in ipairs(d.clip.markers) do
+    for _, m in ipairs(UI.shownMarkers(d.clip.markers)) do
       ImGui.Text(ctx, ('%s   %s'):format(fmtTime(m.off), m.name))
     end
     ImGui.PopStyleColor(ctx)
